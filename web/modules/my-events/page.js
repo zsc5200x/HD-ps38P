@@ -210,10 +210,6 @@ function renderRows() {
   }
   const empty = $("myEventsEmpty");
   if (empty) empty.classList.toggle("hidden", rows.length > 0);
-  const more = $("myEventsMore");
-  if (more && myEvents().view === "orders") {
-    more.classList.toggle("hidden", rows.length >= myEvents().total);
-  }
 }
 
 // ── fixtures view ────────────────────────────────────────────────────────
@@ -871,10 +867,6 @@ function renderCopyGroups() {
     body.append(tr);
   }
   $("myEventsCopyEmpty")?.classList.toggle("hidden", current.copy.length > 0);
-  const more = $("myEventsCopyMore");
-  if (more && current.view === "copy") {
-    more.classList.toggle("hidden", current.copy.length >= current.copyTotal);
-  }
 }
 
 let copyRequestId = 0;
@@ -940,18 +932,6 @@ export function setMyEventsView(view) {
   $("myEventsOrdersWrap")?.classList.toggle("hidden", fixtures || copy);
   $("myEventsFixtureWrap")?.classList.toggle("hidden", !fixtures);
   $("myEventsCopyWrap")?.classList.toggle("hidden", !copy);
-  const ordersMore = $("myEventsMore");
-  if (ordersMore) {
-    ordersMore.classList.toggle("hidden", fixtures || copy || current.rows.length >= current.total);
-  }
-  const fixtureMore = $("myEventsFixtureMore");
-  if (fixtureMore) {
-    fixtureMore.classList.toggle("hidden", !fixtures || current.fixtures.length >= current.fixtureTotal);
-  }
-  const copyMore = $("myEventsCopyMore");
-  if (copyMore) {
-    copyMore.classList.toggle("hidden", !copy || current.copy.length >= current.copyTotal);
-  }
 }
 
 let summaryRequestId = 0;

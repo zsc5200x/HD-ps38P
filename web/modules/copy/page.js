@@ -3,7 +3,8 @@ import { pauseFollow, readFollowDetail, readFollowRecords, requestFollowReconcil
 const $ = (id) => document.getElementById(id);
 const state = {
   filter: "SUCCEEDED", search: "", limit: 50, offset: 0, total: 0, rows: [], accounts: [],
-  rule: null, dirty: false, ready: false, loading: false, mutating: false,
+  rule: null, summary: {}, service: {}, logFilter: "ALL",
+  dirty: false, ready: false, loading: false, mutating: false,
   request: 0, detailRequest: 0, lastRefresh: 0, bound: false,
   renderedQuery: null,
   detailId: null, detailDirty: false, detailBusy: false, detailLoading: false,
@@ -24,6 +25,13 @@ const labels = {
 const sideLabels = { HOME: "主队", AWAY: "客队", OVER: "大", UNDER: "小" };
 const periodLabels = { FT: "全场", HT: "上半场" };
 const marketLabels = { HANDICAP: "让球", TOTAL: "大小" };
+const terminalStatuses = new Set(["SUCCEEDED", "REJECTED", "FAILED", "SKIPPED", "EXPIRED"]);
+const stageLabels = {
+  GROUPING: "合组", WAIT_MAPPING: "赛事匹配", READY: "排队", WAIT_MARKET: "等待盘口",
+  PREPARING: "查盘", RETRY_WAIT: "重试等待", PREPARED: "盘口就绪", SUBMITTING: "提交",
+  SUCCEEDED: "完成", REJECTED: "结束", FAILED: "结束", SKIPPED: "跳过", EXPIRED: "过期",
+  UNKNOWN: "待核对", LATE_ORDER: "迟到核对",
+};
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -51,6 +59,14 @@ function date(value) {
   });
 }
 
+function shortTime(value) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? "—"
+    : parsed.toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+}
+
 function effectiveStatus(row) {
   return row.status === "SUCCEEDED" && !row.receipt_id ? "UNKNOWN" : row.status;
 }
@@ -75,11 +91,16 @@ function lineLabel(value, side, kind) {
 function pickLabel(row, source = false) {
   const side = source ? row.source_side : row.target_side;
   const line = source ? row.source_line : row.target_line;
+  if (!side) return "待匹配盘口";
   return `${periodLabels[row.period] || display(row.period)} · ${marketLabels[row.market_type] || display(row.market_type)} · ${lineLabel(line, side, row.market_type)}`;
 }
 
 function visible() {
   return !$('copyPage')?.hidden && !document.hidden;
+}
+
+function ruleVisible() {
+  return !$('settingsPage')?.hidden && !document.hidden;
 }
 
 function setDirty(value) {
@@ -90,7 +111,7 @@ function setDirty(value) {
 
 function amountHelp() {
   const ratio = $("copyAmountMode").value === "ratio";
-  $("copyAmountLabel").textContent = ratio ? "跟单比例（%）" : "每组金额（元）";
+  $("copyAmountLabel").textContent = ratio ? "跟单比例（%）" : "固定金额（元）";
   $("copyAmountValue").step = ratio ? "0.01" : "1";
   $("copyAmountValue").min = ratio ? "0.01" : "1";
   $("copyAmountHelp").textContent = ratio
@@ -128,89 +149,325 @@ function populateRule(rule) {
   $("copyMaxOdds").value = rule.max_odds ?? "";
   $("copyMembers").value = Array.isArray(rule.member_codes) ? rule.member_codes.join(", ") : "";
   populateAccounts(state.accounts, rule.account_id);
+  syncRuleControls();
   amountHelp();
+}
+
+/** 把隐藏的规则字段同步到分段按钮与开关。 */
+function syncRuleControls() {
+  const mode = $("copyAmountMode")?.value || "fixed";
+  for (const button of document.querySelectorAll("[data-rule-mode]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.ruleMode === mode));
+  }
+  const reverse = ($("copyDirection")?.value || "forward") === "reverse";
+  const toggle = $("cfgReverseSwitch");
+  if (toggle) toggle.checked = reverse;
+  const chip = $("cfgDirectionChip");
+  if (chip) {
+    chip.textContent = reverse ? "反向跟单" : "正向跟单";
+    chip.className = `cfg-chip ${reverse ? "cfg-chip-on" : "cfg-chip-muted"}`;
+  }
+  const hint = $("cfgDirectionHint");
+  if (hint) hint.textContent = reverse ? "开启后按反向处理整组" : "当前按正向处理整组";
 }
 
 function renderService(payload, forceForm) {
   const service = payload.service || {};
   const rule = payload.rule || {};
   const enabled = service.enabled === true;
-  const badge = $("copyServiceBadge");
-  badge.textContent = enabled ? "跟单已启用" : "跟单已暂停";
-  badge.className = `copy-badge ${enabled ? "copy-badge-success" : "copy-badge-muted"}`;
-  $("copyServiceMessage").textContent = service.message || (enabled ? "接收新来单，按规则合组处理。" : "保存规则并启用后开始接收新来单。已生成记录会继续保留。");
-  let queue = $("copyQueueStatus");
-  if (!queue) {
-    queue = node("span", null, "copy-queue-status copy-mono");
-    queue.id = "copyQueueStatus";
-    $("copyServiceMessage").after(queue);
-  }
-  queue.textContent = `执行中 ${number(service.active_tasks ?? 0, 0)} · 排队 ${number(service.queued_tasks ?? 0, 0)}`;
   state.rule = rule;
   state.accounts = Array.isArray(payload.accounts) ? payload.accounts : state.accounts;
   const direction = rule.direction === "reverse" ? "反向" : "正向";
   const amount = rule.amount_mode === "ratio" ? `原单合计 × ${display(rule.amount_value)}%` : `每组 ${display(rule.amount_value)} 元`;
-  $("copyRuleSummary").textContent = `${direction} · ${amount} · 20 秒合组`;
+  $("copyRuleSummary").textContent = `${enabled ? "已启用" : "已暂停"} · ${direction} · ${amount} · 20 秒合组`;
   if (!state.dirty || forceForm) populateRule(rule);
+  const stateChip = $("cfgRuleState");
+  if (stateChip) {
+    stateChip.textContent = enabled ? "已启用" : "已暂停";
+    stateChip.className = `cfg-chip ${enabled ? "cfg-chip-on" : "cfg-chip-muted"}`;
+  }
+  const accountLabel = $("cfgRuleAccount");
+  if (accountLabel) accountLabel.textContent = accountName(rule.account_id) || "—";
   $("copyPause").disabled = !enabled || state.mutating;
   $("copySaveRule").disabled = state.mutating;
   $("copyEnableRule").disabled = state.mutating;
 }
 
 function renderSummary(summary) {
-  for (const [id, key] of [["copySuccessCount", "succeeded"], ["copyProcessingCount", "processing"], ["copyFailedCount", "failed"], ["copyUnknownCount", "unknown"]]) {
-    $(id).textContent = number(summary[key] ?? 0, 0);
-  }
+  state.summary = summary || {};
   for (const count of document.querySelectorAll("[data-copy-count]")) {
-    count.textContent = number(summary[count.dataset.copyCount] ?? 0, 0);
+    count.textContent = number(state.summary[count.dataset.copyCount] ?? 0, 0);
   }
+  renderBoard();
 }
 
-function stackedCell(primary, secondary, className = "") {
-  const cell = node("td", null, className);
-  cell.append(node("span", primary, "copy-cell-main"));
-  if (secondary) cell.append(node("small", secondary, "copy-cell-sub"));
+function setText(id, text) {
+  const element = $(id);
+  if (element) element.textContent = text;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const value = Math.round(seconds);
+  if (value < 60) return `${value} 秒`;
+  const minutes = Math.floor(value / 60);
+  const rest = value % 60;
+  if (minutes < 60) return `${minutes} 分 ${String(rest).padStart(2, "0")} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${String(minutes % 60).padStart(2, "0")} 分`;
+}
+
+function rowSeconds(row) {
+  const start = new Date(row.created_at).getTime();
+  const end = new Date(row.updated_at || row.created_at).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return (end - start) / 1000;
+}
+
+function ruleAmountLabel(rule) {
+  if (!rule || !rule.amount_mode) return "—";
+  return rule.amount_mode === "ratio"
+    ? `原单合计 × ${display(rule.amount_value)}%`
+    : `每组 ${display(rule.amount_value)} 元`;
+}
+
+function renderBoard() {
+  const service = state.service || {};
+  const rule = state.rule || {};
+  const accounts = state.accounts.filter((account) => !account.platform || account.platform === "crown_member");
+  const online = accounts.filter((account) => account.enabled !== false && account.status === "online");
+  const active = Math.min(Number(service.active_tasks || 0), online.length);
+  setText("copyOnlineMembers", number(online.length, 0));
+  setText("copyIdleMembers", number(Math.max(0, online.length - active), 0));
+  setText("copyBusyMembers", number(active, 0));
+  setText("copyOfflineMembers", number(accounts.length - online.length, 0));
+  setText("copyQueuedTasks", number(service.queued_tasks ?? 0, 0));
+  setText("copyActiveTasks", number(service.active_tasks ?? 0, 0));
+
+  const summary = state.summary || {};
+  const succeeded = Number(summary.succeeded || 0);
+  const processed = Number(summary.total || 0) || ["succeeded", "processing", "failed", "unknown"]
+    .reduce((total, key) => total + Number(summary[key] || 0), 0);
+  setText("copySuccessRate", processed ? `${Math.round((succeeded / processed) * 1000) / 10}%` : "—");
+  const rateNode = $("copySuccessRate");
+  if (rateNode) rateNode.className = processed ? (succeeded ? "copy-tone-green" : "copy-tone-danger") : "copy-tone-muted";
+
+  const durations = state.rows
+    .filter((row) => terminalStatuses.has(effectiveStatus(row)))
+    .map(rowSeconds)
+    .filter((value) => value !== null);
+  const average = durations.length ? durations.reduce((total, value) => total + value, 0) / durations.length : null;
+  setText("copyAvgDuration", average === null ? "—" : formatDuration(average));
+  setText("copyOrderTotal", `${number(state.rows.reduce((total, row) => total + Number(row.order_count || 0), 0), 0)} 笔`);
+
+  const stake = summary.confirmed_stake;
+  const currency = summary.currency || "CNY";
+  setText("copyConfirmedStake", stake === null || stake === undefined || String(stake) === "" ? "—" : `${number(stake)} ${currency}`);
+  setText("copyRuleVersion", rule.version ? `v${rule.version}` : "—");
+
+  const params = [
+    ["跟单金额", ruleAmountLabel(rule)],
+    ["合组窗口", `${number(rule.window_seconds ?? 20, 0)} 秒`],
+    ["跟单方向", rule.direction === "reverse" ? "反向跟单" : "正向跟单"],
+    ["目标账号", accountName(rule.account_id)],
+  ];
+  const list = $("copyParamList");
+  if (list) {
+    const fragment = document.createDocumentFragment();
+    for (const [label, value] of params) {
+      const item = node("div");
+      item.append(node("dt", label), node("dd", value));
+      fragment.append(item);
+    }
+    list.replaceChildren(fragment);
+  }
+  renderPool(accounts);
+}
+
+function renderPool(accounts) {
+  const list = $("copyPoolList");
+  if (!list) return;
+  if (!accounts.length) {
+    list.replaceChildren(node("p", "号池暂未返回皇冠会员账号，请到「号池管理」添加。", "copy-pool-empty"));
+    return;
+  }
+  const rule = state.rule || {};
+  const fragment = document.createDocumentFragment();
+  for (const account of accounts) {
+    const name = account.label || account.name || account.username || account.id;
+    const own = state.rows.filter((row) => row.account_id === account.id);
+    const durations = own
+      .filter((row) => terminalStatuses.has(effectiveStatus(row)))
+      .map(rowSeconds)
+      .filter((value) => value !== null);
+    const times = own.map((row) => row.updated_at || row.created_at).filter(Boolean).sort();
+    const isOnline = account.enabled !== false && account.status === "online";
+
+    const card = node("article", null, "copy-pool-card");
+    const avatar = node("span", String(name).slice(0, 1).toUpperCase(), "copy-pool-avatar");
+    avatar.setAttribute("aria-hidden", "true");
+    const body = node("div", null, "copy-pool-body");
+    const title = node("div", null, "copy-pool-title");
+    title.append(node("strong", name));
+    const stateTone = account.enabled === false ? "" : isOnline ? "is-online" : "is-error";
+    title.append(node("span", account.enabled === false ? "已停用" : isOnline ? "在线" : "掉线", `copy-pool-state ${stateTone}`));
+
+    const metrics = node("div", null, "copy-pool-metrics");
+    const rows = [
+      ["本页组数", `${number(own.length, 0)} 组`],
+      ["最近执行", times.length ? shortTime(times[times.length - 1]) : "—"],
+      ["平均耗时", durations.length ? formatDuration(durations.reduce((total, value) => total + value, 0) / durations.length) : "—"],
+    ];
+    for (const [label, value] of rows) {
+      const cell = node("div");
+      cell.append(node("span", label), node("b", value));
+      metrics.append(cell);
+    }
+    body.append(title, metrics);
+    if (rule.account_id && rule.account_id === account.id) body.append(node("span", "当前规则账号", "copy-pool-bind"));
+    card.append(avatar, body);
+    fragment.append(card);
+  }
+  list.replaceChildren(fragment);
+}
+
+function metricCell(label, value, sub, className = "") {
+  const cell = node("div", null, "copy-card-cell");
+  cell.append(node("span", label, "copy-card-label"));
+  cell.append(node("strong", value, `copy-card-value ${className}`.trim()));
+  if (sub) cell.append(node("small", sub, "copy-card-sub"));
   return cell;
+}
+
+function groupCard(row) {
+  const status = effectiveStatus(row);
+  const tone = labels[status]?.[1] || "unknown";
+  const success = status === "SUCCEEDED";
+  const home = row.crown_home || row.home || "待匹配主队";
+  const away = row.crown_away || row.away || "待匹配客队";
+
+  const card = node("article", null, `copy-card copy-card-${tone}`);
+  card.dataset.copyGroup = row.id;
+  card.setAttribute("role", "listitem");
+
+  const head = node("header", null, "copy-card-head");
+  const ident = node("div", null, "copy-card-ident");
+  ident.append(node("span", `订单 #${String(row.id).slice(0, 8)}`, "copy-card-id"));
+  ident.append(node("span", `${number(row.order_count || 0, 0)} 单`, "copy-card-chip"));
+  if (row.market_type) ident.append(node("span", marketLabels[row.market_type] || row.market_type, "copy-card-chip"));
+  if (row.period) ident.append(node("span", periodLabels[row.period] || row.period, "copy-card-chip"));
+  ident.append(node("time", date(row.updated_at || row.created_at), "copy-card-time"));
+  if (row.league) ident.append(node("span", row.league, "copy-card-league"));
+  const badge = statusBadge(row);
+  badge.classList.add("copy-card-badge");
+  head.append(ident, badge);
+  card.append(head);
+
+  const body = node("div", null, "copy-card-body");
+
+  const match = node("div", null, "copy-card-match");
+  const teams = node("div", null, "copy-card-teams");
+  teams.append(node("strong", home), node("span", "VS", "copy-card-vs"), node("strong", away));
+  match.append(teams, node("small", pickLabel(row), "copy-card-pick"));
+  body.append(match);
+
+  body.append(metricCell("投注单数", `${number(row.order_count || 0, 0)} 单`, `${number(row.member_count || 0, 0)} 位会员`));
+
+  const hasAcceptedStake = success && row.accepted_stake !== null && row.accepted_stake !== undefined;
+  const amount = hasAcceptedStake ? row.accepted_stake : row.target_stake;
+  const amountNote = hasAcceptedStake
+    ? (row.receipt_source === "manual" ? "人工核对金额" : "回执金额")
+    : success
+      ? (row.receipt_source === "manual" ? "计划金额 · 未登记实际金额" : "提交金额 · 回执未回显")
+      : "计划金额";
+  const amountText = amount === null || amount === undefined || amount === ""
+    ? "—"
+    : `${number(amount)} ${row.currency || ""}`.trim();
+  body.append(metricCell("投注金额", amountText, amountNote, success ? "is-success" : ""));
+
+  body.append(metricCell(
+    "水位",
+    number(row.accepted_odds ?? row.odds, 3),
+    success && row.accepted_odds != null ? "回执水位 · 香港盘" : "提交水位 · 香港盘",
+  ));
+
+  const statusCell = node("div", null, "copy-card-cell copy-card-status");
+  statusCell.append(node("span", "状态", "copy-card-label"));
+  const statusTone = success ? "is-success" : tone === "failed" ? "is-danger" : tone === "unknown" ? "is-warning" : "";
+  statusCell.append(node("strong", row.status === "GROUPING" ? "20 秒窗口内合组" : (row.message || "—"), `copy-card-value ${statusTone}`.trim()));
+  if (row.status === "GROUPING" && row.window_ends_at) {
+    const countdown = node("small", "合组剩余 —", "copy-card-sub");
+    countdown.dataset.copyCountdown = row.window_ends_at;
+    statusCell.append(countdown);
+  } else if (row.waiting_reason) {
+    statusCell.append(node("small", row.waiting_reason, "copy-card-sub"));
+  }
+  if (row.next_action_at) statusCell.append(node("small", `下次动作 ${date(row.next_action_at)}`, "copy-card-sub"));
+  statusCell.append(node("small", `查盘 ${number(row.prepare_count ?? 0, 0)} · 重试 ${number(row.retry_count ?? 0, 0)} · 核对 ${number(row.reconcile_count ?? 0, 0)}`, "copy-card-sub copy-mono"));
+  if (row.error_category) statusCell.append(node("small", `错误分类 ${row.error_category}`, "copy-card-sub"));
+  if (row.receipt_id) statusCell.append(node("small", `回执 ${row.receipt_id}`, "copy-card-sub copy-mono"));
+  body.append(statusCell);
+
+  const detail = node("button", "明细", "button ghost copy-detail-button");
+  detail.type = "button";
+  detail.dataset.copyDetail = row.id;
+  detail.setAttribute("aria-label", `查看 ${home} 对 ${away} 的跟单明细`);
+  body.append(detail);
+
+  card.append(body);
+  return card;
+}
+
+function logMatches(row, filter) {
+  const status = effectiveStatus(row);
+  if (filter === "SUCCEEDED") return status === "SUCCEEDED";
+  if (filter === "FAILED") return ["REJECTED", "FAILED", "SKIPPED", "EXPIRED"].includes(status);
+  if (filter === "RETRY") return Number(row.retry_count || 0) > 0 || Number(row.prepare_count || 0) > 1;
+  if (filter === "ERROR") return Boolean(row.error_category) || status === "UNKNOWN" || Boolean(row.waiting_reason);
+  return true;
+}
+
+function renderTimeline(rows) {
+  const body = $("copyLogBody");
+  if (!body) return;
+  const selected = rows
+    .filter((row) => logMatches(row, state.logFilter))
+    .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
+  const fragment = document.createDocumentFragment();
+  for (const row of selected) {
+    const status = effectiveStatus(row);
+    const seconds = terminalStatuses.has(status) ? rowSeconds(row) : null;
+    const badgeCell = node("td");
+    badgeCell.append(statusBadge(row));
+    const tr = node("tr");
+    tr.dataset.copyGroup = row.id;
+    tr.append(
+      node("td", date(row.updated_at || row.created_at), "copy-log-time"),
+      node("td", `#${String(row.id).slice(0, 8)}`, "copy-log-order"),
+      node("td", stageLabels[status] || display(status)),
+      node("td", `${number(row.member_count || 0, 0)} 位`),
+      badgeCell,
+      node("td", row.waiting_reason || row.message || "—", "copy-log-detail"),
+      node("td", seconds === null ? "进行中" : formatDuration(seconds), "copy-number copy-mono"),
+    );
+    fragment.append(tr);
+  }
+  body.replaceChildren(fragment);
+  const empty = $("copyLogEmpty");
+  if (empty) empty.hidden = selected.length > 0;
+  for (const button of document.querySelectorAll("[data-copy-log]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.copyLog === state.logFilter));
+  }
 }
 
 function renderRows() {
   const rows = state.rows.filter((row) => state.filter !== "SUCCEEDED" || effectiveStatus(row) === "SUCCEEDED");
   const fragment = document.createDocumentFragment();
-  for (const row of rows) {
-    const tr = document.createElement("tr");
-    tr.dataset.copyGroup = row.id;
-    const status = node("td");
-    status.append(statusBadge(row), node("small", row.receipt_id || "尚无成功回执", "copy-cell-sub copy-mono"));
-    const home = row.crown_home || row.home || "待匹配主队";
-    const away = row.crown_away || row.away || "待匹配客队";
-    const match = stackedCell(`${home} vs ${away}`, row.league, "copy-match-cell");
-    const pick = stackedCell(pickLabel(row), `${row.direction === "reverse" ? "反向" : "正向"} · 原单 ${lineLabel(row.source_line, row.source_side, row.market_type)}`);
-    const success = effectiveStatus(row) === "SUCCEEDED";
-    const hasAcceptedStake = success && row.accepted_stake !== null && row.accepted_stake !== undefined;
-    const amount = hasAcceptedStake ? row.accepted_stake : row.target_stake;
-    const money = stackedCell(`${number(amount)} ${row.currency || ""}`, hasAcceptedStake ? row.receipt_source === "manual" ? "人工核对金额" : "回执金额" : success ? row.receipt_source === "manual" ? "计划金额 · 未登记实际金额" : "提交金额 · 回执未回显" : "计划金额", "copy-number copy-mono");
-    const account = stackedCell(accountName(row.account_id), `${number(row.order_count || 0, 0)} 笔原单 · ${number(row.member_count || 0, 0)} 位会员`);
-    const time = stackedCell(date(row.updated_at || row.created_at), row.status === "GROUPING" ? "20 秒窗口内合组" : row.message, "copy-time-cell");
-    if (row.status === "GROUPING" && row.window_ends_at) {
-      time.querySelector("small").dataset.copyCountdown = row.window_ends_at;
-    }
-    if (row.status !== "GROUPING" && row.waiting_reason) time.querySelector("small")?.remove();
-    if (row.status !== "GROUPING" && row.waiting_reason) time.append(node("small", row.waiting_reason, "copy-cell-sub"));
-    if (row.next_action_at) time.append(node("small", `下次动作 ${date(row.next_action_at)}`, "copy-cell-sub"));
-    time.append(node("small", `查盘 ${number(row.prepare_count ?? 0, 0)} · 重试 ${number(row.retry_count ?? 0, 0)} · 核对 ${number(row.reconcile_count ?? 0, 0)}`, "copy-cell-sub copy-mono"));
-    if (row.error_category) time.append(node("small", `错误分类 ${row.error_category}`, "copy-cell-sub"));
-    const actions = node("td");
-    const detail = node("button", "明细", "button ghost copy-detail-button");
-    detail.type = "button";
-    detail.dataset.copyDetail = row.id;
-    detail.setAttribute("aria-label", `查看 ${home} 对 ${away} 的跟单明细`);
-    actions.append(detail);
-    const oddsLabel = success && row.accepted_odds != null ? "回执水位 · 香港盘" : "提交水位 · 香港盘";
-    tr.append(status, match, pick, stackedCell(number(row.accepted_odds ?? row.odds, 3), oddsLabel, "copy-number copy-mono"), money, account, time, actions);
-    fragment.append(tr);
-  }
+  for (const row of rows) fragment.append(groupCard(row));
   $("copyRows").replaceChildren(fragment);
+  $("copyRows").hidden = rows.length === 0;
   updateCountdowns();
+  renderTimeline(rows);
+  renderBoard();
   $("copyEmpty").hidden = rows.length > 0;
   const searching = Boolean(state.search);
   $("copyEmptyTitle").textContent = searching ? "没有找到匹配的记录" : state.filter === "SUCCEEDED" ? "暂无成功跟单" : "暂无此类跟单记录";
@@ -250,7 +507,7 @@ function updateFilters() {
 }
 
 export async function refreshCopyRecords({ force = false, forceForm = false } = {}) {
-  if (state.mutating || (!force && (state.loading || !visible()))) return;
+  if (state.mutating || (!force && (state.loading || !(visible() || ruleVisible())))) return;
   const request = ++state.request;
   const queryKey = JSON.stringify([state.filter, state.search, state.offset]);
   if (queryKey !== state.renderedQuery) {
@@ -262,7 +519,7 @@ export async function refreshCopyRecords({ force = false, forceForm = false } = 
   }
   state.loading = true;
   $("copyRefresh").disabled = true;
-  $("copyRows").closest("table").setAttribute("aria-busy", "true");
+  $("copyRows").setAttribute("aria-busy", "true");
   try {
     const payload = await readFollowRecords(state);
     if (request !== state.request) return;
@@ -270,6 +527,7 @@ export async function refreshCopyRecords({ force = false, forceForm = false } = 
     state.renderedQuery = queryKey;
     state.rows = Array.isArray(payload.rows) ? payload.rows : [];
     state.total = Number(payload.total || 0);
+    state.service = payload.service || {};
     renderService(payload, forceForm);
     renderSummary(payload.summary || {});
     if (!$("copyDetailDialog").open && !$("copyRows").contains(document.activeElement)) renderRows();
@@ -280,11 +538,7 @@ export async function refreshCopyRecords({ force = false, forceForm = false } = 
     $("copyLoadError").textContent = `${error?.name === "AbortError" ? "读取记录超时" : error?.message || "读取记录失败"}。请刷新重试。`;
     $("copyLoadError").hidden = false;
     if (queryKey !== state.renderedQuery) $("copyRecordCount").textContent = "记录读取失败";
-    if (!state.ready) {
-      $("copyRecordCount").textContent = "记录读取失败";
-      $("copyServiceBadge").textContent = "暂不可用";
-      $("copyServiceMessage").textContent = "跟单服务暂不可用，请稍后刷新。";
-    }
+    if (!state.ready) $("copyRecordCount").textContent = "记录读取失败";
   } finally {
     if (request === state.request) {
       state.loading = false;
@@ -292,7 +546,7 @@ export async function refreshCopyRecords({ force = false, forceForm = false } = 
       $("copyRefresh").disabled = false;
       $("copyMore").disabled = false;
       $("copyPrevious").disabled = false;
-      $("copyRows").closest("table").setAttribute("aria-busy", "false");
+      $("copyRows").setAttribute("aria-busy", "false");
       if ($("copyDetailDialog").open) refreshDetail({ quiet: true });
     }
   }
@@ -310,10 +564,16 @@ function setBusy(busy) {
   if (busy) {
     state.loading = false;
     $("copyRefresh").disabled = false;
-    $("copyRows").closest("table").setAttribute("aria-busy", "false");
+    $("copyRows").setAttribute("aria-busy", "false");
   }
   for (const id of ["copySaveRule", "copyEnableRule", "copyPause"]) $(id).disabled = busy;
-  for (const field of $("copyRuleForm").querySelectorAll("input, select")) field.disabled = busy;
+  for (const field of $("copyRuleForm").querySelectorAll("input, select")) {
+    if (field.dataset.static !== undefined) continue;
+    field.disabled = busy;
+  }
+  for (const control of $("copyRuleForm").querySelectorAll("[data-rule-mode], #cfgReverseSwitch")) {
+    control.disabled = busy;
+  }
   $("copyRuleForm").setAttribute("aria-busy", String(busy));
 }
 
@@ -657,21 +917,42 @@ async function openDetail(id) {
   await refreshDetail();
 }
 
+function updateClock() {
+  const clock = $("copyBoardClock");
+  if (clock) clock.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
 export function bindCopyEvents() {
   if (state.bound || !$("copyPage")) return;
   state.bound = true;
   $("copyRefresh").addEventListener("click", () => refreshCopyRecords({ force: true }));
   $("copyRulesToggle").addEventListener("click", () => {
-    $("copyRuleSettings").open = !$("copyRuleSettings").open;
-    if ($("copyRuleSettings").open) $("copyRuleSettings").scrollIntoView({ block: "nearest" });
+    document.querySelector('[data-page-link="settings"]')?.click();
+    window.setTimeout(() => $("copyRuleForm")?.scrollIntoView({ block: "start", behavior: "smooth" }), 120);
   });
-  $("copyRuleSettings").addEventListener("toggle", () => $("copyRulesToggle").setAttribute("aria-expanded", String($("copyRuleSettings").open)));
+  document.querySelectorAll("[data-rule-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      $("copyAmountMode").value = button.dataset.ruleMode;
+      syncRuleControls();
+      amountHelp();
+      setDirty(true);
+    });
+  });
+  $("cfgReverseSwitch")?.addEventListener("change", (event) => {
+    $("copyDirection").value = event.target.checked ? "reverse" : "forward";
+    syncRuleControls();
+    setDirty(true);
+  });
   $("copyRuleForm").addEventListener("input", () => setDirty(true));
   $("copyRuleForm").addEventListener("change", () => setDirty(true));
   $("copyAmountMode").addEventListener("change", amountHelp);
   $("copyRuleForm").addEventListener("submit", saveRule);
   $("copyPause").addEventListener("click", pauseRule);
   document.querySelectorAll("[data-copy-filter]").forEach((button) => button.addEventListener("click", () => selectFilter(button.dataset.copyFilter)));
+  document.querySelectorAll("[data-copy-log]").forEach((button) => button.addEventListener("click", () => {
+    state.logFilter = button.dataset.copyLog;
+    renderTimeline(state.rows.filter((row) => state.filter !== "SUCCEEDED" || effectiveStatus(row) === "SUCCEEDED"));
+  }));
   let searchTimer;
   $("copySearch").addEventListener("input", () => {
     window.clearTimeout(searchTimer);
@@ -708,16 +989,19 @@ export function bindCopyEvents() {
     renderRows();
   });
   window.addEventListener("ps38:pagenav", (event) => {
-    if (event.detail?.page === "copy") refreshCopyRecords({ force: true });
-    else if ($("copyDetailDialog").open) $("copyDetailDialog").close();
+    const page = event.detail?.page;
+    if (page === "copy" || page === "settings") refreshCopyRecords({ force: true });
+    if (page !== "copy" && $("copyDetailDialog").open) $("copyDetailDialog").close();
   });
   document.addEventListener("visibilitychange", () => { if (visible()) refreshCopyRecords(); });
   window.setInterval(() => {
-    if (visible()) {
-      updateCountdowns();
+    updateClock();
+    if (visible() || ruleVisible()) {
+      if (visible()) updateCountdowns();
       if (Date.now() - state.lastRefresh >= 3000) refreshCopyRecords();
     }
   }, 1000);
   amountHelp();
-  if (visible()) refreshCopyRecords();
+  updateClock();
+  if (visible() || ruleVisible()) refreshCopyRecords();
 }

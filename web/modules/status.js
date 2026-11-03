@@ -33,8 +33,12 @@ export async function refreshCollectorStatus() {
     );
     if (!response.ok || payload.ok === false) {
       setPill("error", "服务异常", payload.error || `HTTP ${response.status}`);
+      window.dispatchEvent(new CustomEvent("ps38:status", {
+        detail: { ok: false, error: payload.error || `HTTP ${response.status}` },
+      }));
       return;
     }
+    window.dispatchEvent(new CustomEvent("ps38:status", { detail: payload }));
     const session = payload.session || {};
     const backfill = payload.backfill || {};
     const status = String(session.status || "starting");
@@ -70,6 +74,9 @@ export async function refreshCollectorStatus() {
     }
   } catch (error) {
     setPill("error", "无法连接", String(error?.message || error));
+    window.dispatchEvent(new CustomEvent("ps38:status", {
+      detail: { ok: false, error: String(error?.message || error) },
+    }));
   }
 }
 

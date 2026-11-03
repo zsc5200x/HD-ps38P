@@ -98,6 +98,28 @@ function bindCollectorActions() {
   });
 }
 
+/** 列表滚到接近底部时自动取下一页，不再显示「加载更多」按钮。 */
+function bindLoadMoreOnScroll() {
+  const views = [
+    ["myEventsOrdersWrap", "orders"],
+    ["myEventsCopyWrap", "copy"],
+    ["myEventsFixtureWrap", "fixtures"],
+  ];
+  for (const [id, view] of views) {
+    const wrap = $(id);
+    if (!wrap) continue;
+    wrap.addEventListener(
+      "scroll",
+      () => {
+        if (state.myEvents.view !== view) return;
+        if (wrap.scrollTop + wrap.clientHeight < wrap.scrollHeight - 160) return;
+        loadMoreMyEvents();
+      },
+      { passive: true },
+    );
+  }
+}
+
 export function bindMyEventsEvents() {
   const initialFrom = $("myEventsFrom");
   const initialTo = $("myEventsTo");
@@ -160,17 +182,7 @@ export function bindMyEventsEvents() {
     window.setTimeout(() => refreshCollectorStatus(), 800);
   });
 
-  $("myEventsMore")?.addEventListener("click", () => {
-    loadMoreMyEvents();
-  });
-
-  $("myEventsFixtureMore")?.addEventListener("click", () => {
-    loadMoreMyEvents();
-  });
-
-  $("myEventsCopyMore")?.addEventListener("click", () => {
-    loadMoreMyEvents();
-  });
+  bindLoadMoreOnScroll();
 
   document.querySelector('[data-my-events-view="fixtures"]')?.addEventListener("click", () => {
     if (state.myEvents.view === "fixtures") return;

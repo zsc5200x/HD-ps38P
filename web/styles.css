@@ -4,11 +4,12 @@
 @import url("./styles/feedback.css?v=20261103-1");
 @import url("./styles/responsive.css?v=20261103-1");
 @import url("./styles/my-events.css?v=20261103-1");
-@import url("./styles/top-nav.css?v=20261103-3");
-@import url("./styles/page-shell.css?v=20261103-4");
+@import url("./styles/top-nav.css?v=20261103-5");
+@import url("./styles/page-shell.css?v=20261103-5");
 @import url("./styles/account-pool.css?v=20261103-22");
 @import url("./styles/merge.css?v=20261103-6");
-@import url("./styles/copy.css?v=20261103-1");
+@import url("./styles/copy.css?v=20261103-11");
+@import url("./styles/settings.css?v=20261103-7");
 
 /* ── standalone shell additions ───────────────────────────────────────── */
 
@@ -55,4 +56,17 @@
   font-style: normal;
   font-weight: 650;
   color: var(--accent);
+}
+
+.brand-version {
+  padding: 1px 5px;
+  border: 1px solid rgba(110, 168, 255, 0.35);
+  border-radius: 4px;
+  color: #9eb7ff;
+  background: rgba(70, 55, 185, 0.14);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 600;
+  line-height: 1.6;
+  letter-spacing: 0;
 }

@@ -304,7 +304,8 @@ class FollowBrowserTests(unittest.TestCase):
 
     def open_page(self):
         self.page.goto(f"{self.origin}/#/copy")
-        self.expect(self.page.locator("#copyServiceBadge")).to_have_text("跟单已暂停")
+        # 顶部状态条已移除，等首轮 /api/follow 返回即可。
+        self.expect(self.page.locator("#copyRecordCount")).to_contain_text("组")
 
     def open_unknown_detail(self):
         self.open_page()
@@ -351,15 +352,21 @@ class FollowBrowserTests(unittest.TestCase):
             }
         ]
         self.open_page()
-        self.expect(self.page.locator("#copyQueueStatus")).to_have_text("执行中 1 · 排队 2")
+        self.expect(self.page.locator("#copyActiveTasks")).to_have_text("1")
+        self.expect(self.page.locator("#copyQueuedTasks")).to_have_text("2")
         self.page.locator('[data-copy-filter="PROCESSING"]').click()
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(2)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(2)
         self.expect(self.page.locator("#copyRows")).to_contain_text("核验盘口中")
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待重试")
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待最新报价")
         self.expect(self.page.locator("#copyRows")).to_contain_text("下次动作")
         self.expect(self.page.locator("#copyRows")).to_contain_text("查盘 2 · 重试 1 · 核对 3")
         self.expect(self.page.locator("#copyRows")).to_contain_text("MARKET_UNAVAILABLE")
+        # 左侧看板与会员池使用同一次 /api/follow 响应，不额外请求接口。
+        self.expect(self.page.locator("#copyOnlineMembers")).to_have_text("1")
+        self.expect(self.page.locator("#copyPoolList")).to_contain_text("皇冠测试账号")
+        self.expect(self.page.locator("#copyLogBody [data-copy-group]")).to_have_count(2)
+        self.expect(self.page.locator("#copyLogBody")).to_contain_text("等待最新报价")
         self.page.locator('[data-copy-detail="retry-1"]').click()
         self.expect(self.page.locator("#copyDetailContent")).to_contain_text("状态历史")
         self.expect(self.page.locator("#copyDetailContent")).to_contain_text(
@@ -525,16 +532,40 @@ class FollowBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#copyDetailActionError")).to_be_hidden()
         self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("QUERY-123")
 
+    def test_shell_keeps_the_page_inside_the_viewport(self):
+        self.records.extend(
+            {**self.records[0], "id": f"bulk-{index}", "receipt_id": f"B-{index}"}
+            for index in range(20)
+        )
+        self.open_page()
+        self.page.locator('[data-copy-filter="ALL"]').click()
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(len(self.records))
+        metrics = self.page.evaluate(
+            """() => {
+              const cards = document.querySelector('.copy-cards');
+              return {
+                scrollHeight: document.documentElement.scrollHeight,
+                viewport: window.innerHeight,
+                cardsClient: cards.clientHeight,
+                cardsScroll: cards.scrollHeight,
+                statusbar: Boolean(document.querySelector('.app-statusbar')),
+              };
+            }"""
+        )
+        self.assertLessEqual(metrics["scrollHeight"], metrics["viewport"])
+        self.assertGreater(metrics["cardsScroll"], metrics["cardsClient"])
+        self.assertTrue(metrics["statusbar"])
+
     def test_success_receipts_default_and_unknown_are_separate(self):
         self.open_page()
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(1)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(1)
         self.expect(self.page.locator("#copyRows")).to_contain_text("R-123")
         self.expect(self.page.locator("#copyPrevious")).to_be_hidden()
         self.expect(self.page.locator("#copyMore")).to_be_hidden()
         self.expect(self.page.locator("#copyRows")).to_contain_text("提交金额 · 回执未回显")
         self.assertEqual(self.queries[0]["status"], ["SUCCEEDED"])
         self.page.locator('[data-copy-filter="UNKNOWN"]').click()
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(1)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(1)
         self.expect(self.page.locator("#copyRows")).to_contain_text("待核对")
         self.expect(self.page.locator("#copyRows")).not_to_contain_text("跟单成功")
         self.page.locator("#copyRows [data-copy-detail]").click()
@@ -550,42 +581,49 @@ class FollowBrowserTests(unittest.TestCase):
     def test_poll_does_not_overwrite_edits_and_save_is_explicit(self):
         self.open_page()
         self.assertEqual(self.saves, [])
+        # 跟单规则已移到设置页，跟单页按钮只负责跳转。
         self.page.locator("#copyRulesToggle").click()
+        self.expect(self.page.locator('[data-page-panel="settings"]')).to_be_visible()
         self.expect(self.page.locator("#copyRuleForm [name=currency]")).to_have_count(0)
         self.expect(self.page.locator("#copyRuleForm")).to_contain_text("不做汇率换算")
-        self.page.locator("#copyAmountMode").select_option("fixed")
+        self.page.locator('[data-rule-mode="fixed"]').click()
         self.page.locator("#copyAmountValue").fill("321")
-        self.page.locator("#copyRefresh").click()
-        self.expect(self.page.locator("#copyRefresh")).to_be_enabled()
+        self.page.evaluate(
+            "() => import('/static/modules/copy/page.js')"
+            ".then(m => m.refreshCopyRecords({ force: true }))"
+        )
+        self.page.wait_for_timeout(300)
         self.expect(self.page.locator("#copyAmountValue")).to_have_value("321")
         self.expect(self.page.locator("#copyRuleDirty")).to_be_visible()
         self.page.locator("#copySaveRule").click()
         self.expect(self.page.locator("#copyRuleFeedback")).to_have_text("规则已保存。")
         self.assertFalse(self.saves[-1]["enabled"])
         self.assertNotIn("currency", self.saves[-1])
-        self.expect(self.page.locator("#copyServiceBadge")).to_have_text("跟单已暂停")
+        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已暂停")
         self.page.locator("#copyEnableRule").click()
-        self.expect(self.page.locator("#copyServiceBadge")).to_have_text("跟单已启用")
+        self.expect(self.page.locator("#copyRuleFeedback")).to_have_text("规则已保存，跟单已启用。")
         self.assertTrue(self.saves[-1]["enabled"])
+        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已启用")
         self.page.locator("#copyPause").click()
-        self.expect(self.page.locator("#copyServiceBadge")).to_have_text("跟单已暂停")
+        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已暂停")
 
     def test_errors_preserve_form_and_navigation_remains_usable(self):
         self.open_page()
         self.fail_save = True
         self.page.locator("#copyRulesToggle").click()
+        self.expect(self.page.locator('[data-page-panel="settings"]')).to_be_visible()
         self.page.locator("#copyAmountValue").fill("15")
         self.page.locator("#copySaveRule").click()
         self.expect(self.page.locator("#copyFormError")).to_have_text("模拟规则保存失败")
         self.expect(self.page.locator("#copyAmountValue")).to_have_value("15")
         self.expect(self.page.locator("#copySaveRule")).to_be_enabled()
         self.fail_read = True
-        self.page.locator("#copyRefresh").click()
+        self.page.locator('[data-page-link="copy"]').click()
         self.expect(self.page.locator("#copyLoadError")).to_contain_text("模拟读取失败")
         self.expect(self.page.locator("#copyRows")).to_contain_text("R-123")
         self.page.locator('[data-copy-filter="UNKNOWN"]').click()
         self.expect(self.page.locator("#copyRecordCount")).to_have_text("记录读取失败")
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(0)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(0)
         self.page.locator('[data-page-link="settings"]').click()
         self.expect(self.page.locator('[data-page-panel="settings"]')).to_be_visible()
 
@@ -595,15 +633,15 @@ class FollowBrowserTests(unittest.TestCase):
             for index in range(55)
         ]
         self.open_page()
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(50)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(50)
         self.page.locator("#copyMore").click()
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(5)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(5)
         self.expect(self.page.locator("#copyPrevious")).to_be_visible()
         self.page.locator("#copySearch").fill("不存在")
         self.expect(self.page.locator("#copyEmptyTitle")).to_have_text("没有找到匹配的记录")
         self.assertEqual(self.queries[-1].get("offset"), ["0"])
         self.page.locator("#copyEmptyAll").click()
-        self.expect(self.page.locator("#copyRows tr")).to_have_count(50)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(50)
         self.expect(self.page.locator("#copySearch")).to_have_value("")
 
     def test_remote_text_is_rendered_as_text_and_mobile_fits(self):

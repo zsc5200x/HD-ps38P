@@ -17,8 +17,8 @@
 | 平博官方赛事目录 | `ps38app/pinnacle_fixtures.py`、`fixture_merge.py` | 目录提供赛事身份与赛前／滚球分类，订单统计按身份补充 |
 | 赛事对照、联赛绑定与映射存储 | `ps38app/fixture_merge.py`、`fixture_identity.py` | 严格匹配条件及人工确认，独立映射库 |
 | 跟单规则、分组与回执 | `ps38app/follow/` | 独立任务库，消费已提交源事件，平台适配与状态机分离 |
-| 页面导航与布局 | `web/modules/nav.js`、`web/styles/` | 显式模块导入，共用页面壳 |
-| 页面业务 | `web/modules/my-events/`、`merge/`、`copy/`、`pool.js` | 保持 API 数据请求和 DOM 事件职责清晰 |
+| 页面导航与布局 | `web/modules/nav.js`、`web/modules/statusbar.js`、`web/styles/` | 显式模块导入，共用页面壳；桌面端固定视口，页面在壳内滚动 |
+| 页面业务 | `web/modules/my-events/`、`merge/`、`copy/`、`settings/`、`pool.js` | 保持 API 数据请求和 DOM 事件职责清晰 |
 
 ## 运行数据
 

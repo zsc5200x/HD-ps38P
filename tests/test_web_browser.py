@@ -159,6 +159,11 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator('[data-page-link="settings"]')).to_have_attribute(
             "aria-current", "page"
         )
+        self.expect(self.page.locator(".settings-panel")).to_have_count(3)
+        self.expect(self.page.locator("#copyRuleForm")).to_be_visible()
+        self.expect(self.page.locator("#settingsState")).to_have_text("采集在线")
+        self.expect(self.page.locator(".app-statusbar")).to_be_visible()
+        self.expect(self.page.locator("#statusbarHealth")).to_contain_text("系统安全运行中")
 
         self.page.locator('[data-page-link="merge"]').click()
         self.expect(self.page).to_have_url(f"{self.origin}/#/merge")

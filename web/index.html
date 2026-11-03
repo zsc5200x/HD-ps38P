@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0a0f19">
   <link rel="icon" type="image/svg+xml" href="static/logo.svg?v=1">
   <title>HD PS38 Sports</title>
-  <link rel="stylesheet" href="static/styles.css?v=20261103-25">
+  <link rel="stylesheet" href="static/styles.css?v=20261103-27">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -40,16 +40,11 @@
         </span>
         <span class="brand-copy">
           <span class="eyebrow">SPORTS EVENTS DESK</span>
-          <h1>HD PS38 <em>Sports</em></h1>
+          <h1>HD PS38 <em>Sports</em><span id="brandVersion" class="brand-version" hidden>v—</span></h1>
         </span>
       </div>
       <div class="topbar-center">
         <div class="top-nav">
-          <span id="collectorPill" class="nav-status" title="采集状态">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span id="collectorPillText">连接中…</span>
-          </span>
-          <span class="nav-divider" aria-hidden="true"></span>
           <nav class="nav-links" aria-label="主导航">
             <span class="nav-glider" aria-hidden="true"></span>
             <a class="nav-link" href="#/home" data-page-link="home" aria-current="page">主页</a>
@@ -60,7 +55,12 @@
           </nav>
         </div>
       </div>
-      <div class="topbar-actions"></div>
+      <div class="topbar-actions">
+        <span id="collectorPill" class="nav-status topbar-status" title="采集状态">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="collectorPillText">连接中…</span>
+        </span>
+      </div>
     </header>
 
     <!-- 公共壳：所有页面共用同一条标题栏，操作按钮随页面切换（样式见 page-shell.css）。 -->
@@ -72,7 +72,7 @@
           <button id="myEventsLogin" class="button primary" type="button" title="把代理后台浏览器窗口弹到前台；已登录时直接切换，不会退出登录">登录后台</button>
         </div>
         <div class="page-action-group" data-page-actions="copy" hidden>
-          <button id="copyRulesToggle" class="button ghost" type="button" aria-controls="copyRuleSettings" aria-expanded="false">跟单规则</button>
+          <button id="copyRulesToggle" class="button ghost" type="button" aria-controls="copyRuleForm">跟单规则</button>
           <button id="copyRefresh" class="button ghost" type="button">刷新记录</button>
         </div>
         <div class="page-action-group" data-page-actions="merge" hidden>
@@ -82,12 +82,6 @@
         <div class="page-action-group" data-page-actions="pool" hidden>
           <button id="poolCheckAll" class="button ghost" type="button">全部检测</button>
           <button id="poolAdd" class="button primary" type="button">新增账号</button>
-        </div>
-        <div class="page-action-group" data-page-actions="settings" hidden>
-          <button class="button primary" type="button" data-nav-action="refresh">立即刷新</button>
-          <button class="button ghost" type="button" data-nav-action="backfill">补历史</button>
-          <button class="button ghost" type="button" data-nav-action="relogin">重新登录</button>
-          <button class="button ghost" type="button" data-nav-action="open-login">登录后台</button>
         </div>
       </div>
     </div>
@@ -183,7 +177,6 @@
         </table>
         <div id="myEventsEmpty" class="my-events-empty hidden">暂无订单</div>
       </div>
-      <button id="myEventsMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
 
       <div id="myEventsFixtureWrap" class="my-events-table-wrap hidden">
         <table class="my-events-table my-events-fixture-table">
@@ -230,77 +223,102 @@
           </div>
         </div>
       </div>
-      <button id="myEventsCopyMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
 
     </section>
 
     <section id="copyPage" class="page-view shell-page copy-page" data-page-panel="copy" aria-label="PS38 跟单" hidden>
       <div class="page-shell-body copy-body">
-        <div class="copy-servicebar">
-          <div class="copy-service-main">
-            <span id="copyServiceBadge" class="copy-badge">读取中</span>
-            <span id="copyServiceMessage">正在读取跟单状态…</span>
+        <div class="copy-layout">
+          <aside class="copy-side" aria-label="实时性能看板">
+            <section class="copy-panel copy-board">
+              <header class="copy-panel-head">
+                <h2><span class="copy-panel-mark" aria-hidden="true"></span>实时性能看板</h2>
+                <span id="copyBoardClock" class="copy-panel-meta">--:--:--</span>
+              </header>
+              <div class="copy-board-grid">
+                <div class="copy-kpi"><span>在线会员</span><strong id="copyOnlineMembers" class="copy-tone-green">—</strong></div>
+                <div class="copy-kpi"><span>空闲会员</span><strong id="copyIdleMembers" class="copy-tone-green">—</strong></div>
+                <div class="copy-kpi"><span>执行中会员</span><strong id="copyBusyMembers" class="copy-tone-blue">—</strong></div>
+                <div class="copy-kpi"><span>掉线会员</span><strong id="copyOfflineMembers" class="copy-tone-danger">—</strong></div>
+              </div>
+              <div class="copy-board-grid copy-board-tasks">
+                <div class="copy-kpi"><span>等待任务</span><strong id="copyQueuedTasks" class="copy-tone-muted">—</strong></div>
+                <div class="copy-kpi"><span>执行任务</span><strong id="copyActiveTasks" class="copy-tone-blue">—</strong></div>
+                <div class="copy-kpi"><span>累计成功率</span><strong id="copySuccessRate" class="copy-tone-green">—</strong></div>
+              </div>
+              <div class="copy-perf">
+                <div class="copy-perf-head">执行性能</div>
+                <div class="copy-perf-grid">
+                  <div><span>平均处理耗时</span><b id="copyAvgDuration">—</b></div>
+                  <div><span>本页原单数</span><b id="copyOrderTotal">—</b></div>
+                  <div><span>成功跟单金额</span><b id="copyConfirmedStake">—</b></div>
+                </div>
+              </div>
+              <div class="copy-params">
+                <div class="copy-params-head"><span>当前跟单参数</span><span id="copyRuleVersion" class="copy-params-version">—</span></div>
+                <dl id="copyParamList" class="copy-param-list"></dl>
+              </div>
+            </section>
+
+            <section class="copy-panel copy-pool" aria-labelledby="copyPoolTitle">
+              <header class="copy-panel-head">
+                <h2 id="copyPoolTitle"><span class="copy-panel-mark" aria-hidden="true"></span>会员执行池</h2>
+                <span class="copy-panel-meta">实时状态</span>
+              </header>
+              <div id="copyPoolList" class="copy-pool-list"></div>
+            </section>
+          </aside>
+
+          <div class="copy-main">
+            <section class="copy-records" aria-labelledby="copyRecordsTitle">
+              <header class="copy-records-head">
+                <div class="copy-records-title">
+                  <h2 id="copyRecordsTitle">跟单记录</h2>
+                  <span id="copyRecordsHint">展示已收到成功回执的真实跟单订单。</span>
+                </div>
+                <label class="copy-search" for="copySearch"><span class="sr-only">搜索跟单记录</span><input id="copySearch" type="search" placeholder="搜索球队、订单号或会员" autocomplete="off"></label>
+              </header>
+              <div class="copy-filters" role="group" aria-label="筛选跟单状态">
+                <button type="button" data-copy-filter="ALL" aria-pressed="false">全部 <span data-copy-count="total">0</span></button>
+                <button type="button" data-copy-filter="PROCESSING" aria-pressed="false">执行中 <span data-copy-count="processing">0</span></button>
+                <button type="button" data-copy-filter="SUCCEEDED" aria-pressed="true">成功 <span data-copy-count="succeeded">0</span></button>
+                <button type="button" data-copy-filter="FAILED" aria-pressed="false">失败 <span data-copy-count="failed">0</span></button>
+                <button type="button" data-copy-filter="UNKNOWN" aria-pressed="false">待核对 <span data-copy-count="unknown">0</span></button>
+              </div>
+              <div id="copyLoadError" class="copy-alert copy-alert-error" role="alert" hidden></div>
+              <div id="copyRows" class="copy-cards" role="list" aria-label="跟单订单列表" aria-busy="false"></div>
+              <div id="copyEmpty" class="copy-empty" hidden>
+                <span class="copy-empty-icon" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h10a2 2 0 0 1 2 2v16l-3-2-4 2-4-2-3 2V5a2 2 0 0 1 2-2Z"/><path d="m8 10 2.5 2.5L16 7M8 16h8"/></svg></span>
+                <h3 id="copyEmptyTitle">暂无成功跟单</h3><p id="copyEmptyText">收到皇冠明确成功回执后，订单会显示在这里。</p>
+                <button id="copyEmptyAll" class="button ghost" type="button">查看全部记录</button>
+              </div>
+              <footer class="copy-records-foot"><span id="copyRecordCount" role="status" aria-live="polite">正在加载…</span><div><span id="copyUpdatedAt">自动刷新 · 每 3 秒</span><button id="copyPrevious" class="button ghost" type="button" hidden>上一页</button><button id="copyMore" class="button ghost" type="button" hidden>下一页</button></div></footer>
+            </section>
+
+            <section class="copy-log" aria-labelledby="copyLogTitle">
+              <header class="copy-log-head">
+                <h2 id="copyLogTitle">执行日志 / 状态时间线</h2>
+                <div class="copy-log-filters" role="group" aria-label="筛选执行日志">
+                  <button type="button" data-copy-log="ALL" aria-pressed="true">全部</button>
+                  <button type="button" data-copy-log="SUCCEEDED" aria-pressed="false">成功</button>
+                  <button type="button" data-copy-log="FAILED" aria-pressed="false">失败</button>
+                  <button type="button" data-copy-log="RETRY" aria-pressed="false">重试</button>
+                  <button type="button" data-copy-log="ERROR" aria-pressed="false">异常</button>
+                </div>
+              </header>
+              <div class="copy-log-wrap">
+                <table class="copy-log-table">
+                  <thead><tr><th scope="col">时间</th><th scope="col">订单号</th><th scope="col">阶段</th><th scope="col">会员</th><th scope="col">状态</th><th scope="col">详情</th><th scope="col" class="copy-number">耗时</th></tr></thead>
+                  <tbody id="copyLogBody"></tbody>
+                </table>
+              </div>
+              <p id="copyLogEmpty" class="copy-log-empty" hidden>当前筛选下暂无执行记录。</p>
+            </section>
           </div>
-          <span class="copy-scope">滚球足球 · 全场 / 上半场 · 让球 / 大小</span>
-        </div>
-        <div class="copy-overview" aria-label="跟单统计">
-          <article class="copy-stat copy-stat-success"><span>跟单成功</span><strong id="copySuccessCount">—</strong><small>已取得明确成功回执</small></article>
-          <article class="copy-stat"><span>处理中</span><strong id="copyProcessingCount">—</strong><small>合组、匹配或等待盘口</small></article>
-          <article class="copy-stat"><span>未完成</span><strong id="copyFailedCount">—</strong><small>失败、已跳过或已过期</small></article>
-          <article class="copy-stat copy-stat-unknown"><span>待核对</span><strong id="copyUnknownCount">—</strong><small>结果不明，停止重复提交</small></article>
         </div>
 
-        <details id="copyRuleSettings" class="copy-rule-panel">
-          <summary><span><strong>跟单规则</strong><span id="copyRuleSummary">设置方向、金额和皇冠账号</span></span><span id="copyRuleDirty" class="copy-rule-dirty" hidden>有未保存修改</span></summary>
-          <form id="copyRuleForm" class="copy-rule-form">
-            <p class="copy-form-intro">同条件原单在 20 秒内合成一组，窗口结束后按本规则处理。金额统一按人民币计算；后台显示 THB 的原单也按原数字计入，不做汇率换算。启用后只接收新来单。</p>
-            <div class="copy-fields">
-              <label for="copyDirection">跟单方向<select id="copyDirection" name="direction"><option value="forward">正向跟单</option><option value="reverse">反向跟单</option></select></label>
-              <label for="copyAmountMode">金额方式<select id="copyAmountMode" name="amount_mode"><option value="fixed">每组固定金额</option><option value="ratio">原单合计金额比例</option></select></label>
-              <label for="copyAmountValue"><span id="copyAmountLabel">每组金额</span><input id="copyAmountValue" name="amount_value" type="number" min="0.01" step="0.01" required inputmode="decimal" aria-describedby="copyAmountHelp"><small id="copyAmountHelp">每组仅计算一次固定金额。</small></label>
-              <label for="copyAccount">皇冠账号<select id="copyAccount" name="account_id" required><option value="">请选择皇冠账号</option></select><small>账号会话由号池管理。</small></label>
-              <label for="copyMaxAge">最长原单年龄（秒）<input id="copyMaxAge" name="max_age_seconds" type="number" min="21" max="600" step="1" value="120" required inputmode="numeric"><small>21–600 秒，包含合组和等待盘口的时间。</small></label>
-              <label for="copyMinOdds">最低水位（香港盘）<input id="copyMinOdds" name="min_odds" type="number" step="0.001" min="0.001" placeholder="不限制" inputmode="decimal"></label>
-              <label for="copyMaxOdds">最高水位（香港盘）<input id="copyMaxOdds" name="max_odds" type="number" step="0.001" min="0.001" placeholder="不限制" inputmode="decimal"></label>
-              <label for="copyMembers" class="copy-field-wide">来源会员<input id="copyMembers" name="member_codes" type="text" placeholder="留空接收全部会员；多个会员用逗号分隔" autocomplete="off"></label>
-            </div>
-            <p id="copyFormError" class="copy-alert copy-alert-error" role="alert" tabindex="-1" hidden></p>
-            <div class="copy-rule-actions">
-              <span id="copyRuleFeedback" class="copy-form-feedback" role="status"></span>
-              <button id="copyPause" class="button ghost" type="button" disabled>暂停跟单</button>
-              <button id="copySaveRule" class="button ghost" type="submit" value="save" disabled>保存规则</button>
-              <button id="copyEnableRule" class="button primary" type="submit" value="enable" disabled>保存并启用</button>
-            </div>
-          </form>
-        </details>
-
-        <section class="copy-records" aria-labelledby="copyRecordsTitle">
-          <header class="copy-records-head">
-            <div><h2 id="copyRecordsTitle">跟单记录</h2><span id="copyRecordsHint">展示已收到成功回执的真实跟单订单。</span></div>
-            <label class="copy-search" for="copySearch"><span class="sr-only">搜索跟单记录</span><input id="copySearch" type="search" placeholder="搜索球队、订单号或会员" autocomplete="off"></label>
-          </header>
-          <div class="copy-filters" role="group" aria-label="筛选跟单状态">
-            <button type="button" data-copy-filter="SUCCEEDED" aria-pressed="true">已成功 <span data-copy-count="succeeded">0</span></button>
-            <button type="button" data-copy-filter="PROCESSING" aria-pressed="false">处理中 <span data-copy-count="processing">0</span></button>
-            <button type="button" data-copy-filter="FAILED" aria-pressed="false">未完成 <span data-copy-count="failed">0</span></button>
-            <button type="button" data-copy-filter="UNKNOWN" aria-pressed="false">待核对 <span data-copy-count="unknown">0</span></button>
-            <button type="button" data-copy-filter="ALL" aria-pressed="false">全部 <span data-copy-count="total">0</span></button>
-          </div>
-          <div id="copyLoadError" class="copy-alert copy-alert-error" role="alert" hidden></div>
-          <div class="copy-table-wrap" role="region" aria-label="跟单订单列表" tabindex="0">
-            <table class="copy-table">
-              <thead><tr><th scope="col">状态 / 回执号</th><th scope="col">皇冠比赛</th><th scope="col">跟单盘口</th><th scope="col" class="copy-number">水位</th><th scope="col" class="copy-number">金额</th><th scope="col">账号 / 来源</th><th scope="col">时间</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
-              <tbody id="copyRows"></tbody>
-            </table>
-          </div>
-          <div id="copyEmpty" class="copy-empty" hidden>
-            <span class="copy-empty-icon" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h10a2 2 0 0 1 2 2v16l-3-2-4 2-4-2-3 2V5a2 2 0 0 1 2-2Z"/><path d="m8 10 2.5 2.5L16 7M8 16h8"/></svg></span>
-            <h3 id="copyEmptyTitle">暂无成功跟单</h3><p id="copyEmptyText">收到皇冠明确成功回执后，订单会显示在这里。</p>
-            <button id="copyEmptyAll" class="button ghost" type="button">查看全部记录</button>
-          </div>
-          <footer class="copy-records-foot"><span id="copyRecordCount" role="status" aria-live="polite">正在加载…</span><div><span id="copyUpdatedAt">自动刷新 · 每 3 秒</span><button id="copyPrevious" class="button ghost" type="button" hidden>上一页</button><button id="copyMore" class="button ghost" type="button" hidden>下一页</button></div></footer>
-        </section>
       </div>
+
       <dialog id="copyDetailDialog" class="copy-dialog" aria-labelledby="copyDetailTitle">
         <header class="copy-dialog-head"><div><span class="copy-kicker">跟单明细</span><h2 id="copyDetailTitle">订单详情</h2></div><button id="copyDetailClose" class="button ghost" type="button" aria-label="关闭跟单明细">关闭</button></header>
         <div id="copyDetailContent" class="copy-detail-content"></div>
@@ -431,45 +449,378 @@
       </div>
     </section>
 
-    <section id="settingsPage" class="page-view shell-page" data-page-panel="settings" aria-label="设置" hidden>
-      <div class="page-shell-body module-body">
-          <div class="module-grid">
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">CONFIG</span>
-              </div>
-              <h2>配置文件</h2>
-              <p class="module-value">config.json</p>
-              <p>端口、数据库、采集账号、采集节奏与历史起点都在这里修改。</p>
-            </article>
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">STORE</span>
-              </div>
-              <h2>订单库</h2>
-              <p class="module-value">data/orders.sqlite3</p>
-              <p>页面只读查询；导入旧库与补采历史通过命令行完成。</p>
-            </article>
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">CADENCE</span>
-              </div>
-              <h2>采集节奏</h2>
-              <p class="module-value">1s / 300s</p>
-              <p>未结算约 1 秒一轮，已结算约 5 分钟一轮，均为 config.json 默认值。</p>
-            </article>
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">SESSION</span>
-              </div>
-              <h2>浏览器会话</h2>
-              <p class="module-value">data/profile</p>
-              <p>登录 Cookie 保存在本地；退出登录使用本页的「重新登录」。</p>
-            </article>
+    <section id="settingsPage" class="page-view shell-page settings-page" data-page-panel="settings" aria-label="设置" hidden>
+      <div class="page-shell-body settings-body">
+        <div class="settings-bar">
+          <span id="settingsState" class="settings-state">读取中</span>
+          <span id="settingsStateText" class="settings-bar-text">正在读取运行配置…</span>
+          <span id="settingsUpdated" class="settings-bar-meta">—</span>
+        </div>
+
+        <div class="cfg-toolbar">
+          <div class="cfg-toolbar-copy">
+            <span class="cfg-toolbar-title">跟单规则</span>
+            <span id="copyRuleSummary" class="cfg-toolbar-summary">设置方向、金额和皇冠账号</span>
+            <span id="copyRuleDirty" class="cfg-toolbar-dirty" hidden>有未保存修改</span>
+          </div>
+          <div class="cfg-toolbar-actions">
+            <button id="settingsSystemOpen" class="button ghost" type="button">系统信息</button>
+            <span id="copyRuleFeedback" class="cfg-toolbar-feedback" role="status"></span>
+            <button id="copyPause" class="button ghost" type="button" disabled>暂停跟单</button>
+            <button id="copySaveRule" class="button ghost" type="submit" form="copyRuleForm" value="save" disabled>保存规则</button>
+            <button id="copyEnableRule" class="button primary" type="submit" form="copyRuleForm" value="enable" disabled>保存并启用</button>
           </div>
         </div>
+
+        <form id="copyRuleForm" class="cfg-grid" novalidate>
+          <p id="copyFormError" class="copy-alert copy-alert-error cfg-form-error" role="alert" tabindex="-1" hidden></p>
+
+          <div class="cfg-col">
+            <section class="cfg-panel">
+              <header class="cfg-head">
+                <span class="cfg-mark" aria-hidden="true"></span>
+                <h2>基础跟单</h2>
+                <span id="cfgRuleState" class="cfg-chip cfg-chip-on">已暂停</span>
+              </header>
+              <div class="cfg-body">
+                <div class="cfg-field">
+                  <span class="cfg-label">跟单模式</span>
+                  <div class="cfg-seg" role="group" aria-label="跟单模式">
+                    <button type="button" data-rule-mode="fixed" aria-pressed="true">¥ 固定金额</button>
+                    <button type="button" data-rule-mode="ratio" aria-pressed="false">按比例</button>
+                  </div>
+                  <input type="hidden" id="copyAmountMode" name="amount_mode" value="fixed">
+                </div>
+
+                <div class="cfg-switchrow">
+                  <div class="cfg-switchcopy">
+                    <strong>只跟滚球</strong>
+                    <small>首版仅处理滚球足球单关，固定开启</small>
+                  </div>
+                  <label class="cfg-switch" title="首版固定为滚球">
+                    <input type="checkbox" checked disabled data-static>
+                    <span></span>
+                  </label>
+                </div>
+
+                <div class="cfg-pair">
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="copyAmountValue"><span id="copyAmountLabel">固定金额（元）</span></label>
+                    <input id="copyAmountValue" name="amount_value" type="number" min="1" step="1" required inputmode="decimal" aria-describedby="copyAmountHelp">
+                    <small id="copyAmountHelp" class="cfg-help">每组使用一次固定金额，按人民币整元计算。</small>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="copyAccount">皇冠账号</label>
+                    <select id="copyAccount" name="account_id" required><option value="">请选择皇冠账号</option></select>
+                    <small class="cfg-help">账号会话由号池管理。</small>
+                  </div>
+                </div>
+
+                <div class="cfg-pair">
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="copyMaxAge">最长原单年龄（秒）</label>
+                    <input id="copyMaxAge" name="max_age_seconds" type="number" min="21" max="600" step="1" value="120" required inputmode="numeric">
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="copyMembers">来源会员</label>
+                    <input id="copyMembers" name="member_codes" type="text" placeholder="留空 = 全部会员" autocomplete="off">
+                  </div>
+                </div>
+
+                <div class="cfg-pending-row">
+                  <span>分单数量 <b>1</b></span>
+                  <span>分单间隔 <b>0s</b></span>
+                  <span>单场限额 <b>0</b></span>
+                  <span>盘口限额 <b>0</b></span>
+                  <em class="cfg-pending">待接入</em>
+                </div>
+
+                <p class="cfg-note" title="同条件原单在 20 秒内合成一组；金额统一按人民币计算，后台显示 THB 的原单也按原数字计入，不做汇率换算。">20 秒同条件合组；人民币计算，THB 按原数字计入，不做汇率换算。</p>
+              </div>
+            </section>
+
+            <section class="cfg-panel">
+              <header class="cfg-head">
+                <span class="cfg-mark" aria-hidden="true"></span>
+                <h2>玩法比例 / 赛跟控制</h2>
+                <span class="cfg-chip cfg-chip-muted">待接入</span>
+              </header>
+              <div class="cfg-body cfg-rows">
+                <div class="cfg-rule-row">
+                  <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                  <strong>让球</strong>
+                  <span class="cfg-rule-off">关闭</span>
+                  <div class="cfg-stepper"><button type="button" disabled>−</button><input value="100" disabled data-static><span>%</span><button type="button" disabled>＋</button></div>
+                </div>
+                <div class="cfg-rule-row">
+                  <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                  <strong>大球</strong>
+                  <span class="cfg-rule-off">关闭</span>
+                  <div class="cfg-stepper"><button type="button" disabled>−</button><input value="100" disabled data-static><span>%</span><button type="button" disabled>＋</button></div>
+                </div>
+                <div class="cfg-rule-row">
+                  <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                  <strong>小球</strong>
+                  <span class="cfg-rule-off">关闭</span>
+                  <div class="cfg-stepper"><button type="button" disabled>−</button><input value="100" disabled data-static><span>%</span><button type="button" disabled>＋</button></div>
+                </div>
+                <div class="cfg-rule-row">
+                  <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                  <strong>独赢</strong>
+                  <span class="cfg-rule-off">关闭</span>
+                  <div class="cfg-stepper"><button type="button" disabled>−</button><input value="100" disabled data-static><span>%</span><button type="button" disabled>＋</button></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="cfg-panel">
+              <header class="cfg-head">
+                <span class="cfg-mark" aria-hidden="true"></span>
+                <h2>后台过滤</h2>
+                <span class="cfg-chip cfg-chip-muted">待接入</span>
+              </header>
+              <div class="cfg-body">
+                <p class="cfg-help">按来源代理筛选订单；接入后逐行配置盘口与跟单开关。</p>
+                <div id="settingsAgentList" class="cfg-agentlist">
+                  <p class="cfg-empty">等待采集器返回代理列表…</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="cfg-panel">
+              <header class="cfg-head">
+                <span class="cfg-mark" aria-hidden="true"></span>
+                <h2>反单规则</h2>
+                <span id="cfgDirectionChip" class="cfg-chip cfg-chip-on">反向跟单</span>
+              </header>
+              <div class="cfg-body">
+                <div class="cfg-switchrow">
+                  <div class="cfg-switchcopy">
+                    <strong>全局反打</strong>
+                    <small id="cfgDirectionHint">开启后按反向处理整组</small>
+                  </div>
+                  <label class="cfg-switch"><input type="checkbox" id="cfgReverseSwitch"><span></span></label>
+                  <input type="hidden" id="copyDirection" name="direction" value="forward">
+                </div>
+
+                <div class="cfg-pair">
+                  <div class="cfg-switchrow cfg-switchrow-compact">
+                    <div class="cfg-switchcopy"><strong>反打大小球</strong><small>待接入</small></div>
+                    <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                  </div>
+                  <div class="cfg-switchrow cfg-switchrow-compact">
+                    <div class="cfg-switchcopy"><strong>反打让球</strong><small>待接入</small></div>
+                    <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                  </div>
+                </div>
+
+                <div class="cfg-static-row">
+                  <span>执行链条 <b>Snapshot Direct</b></span>
+                  <span>盘口来源 <b>Latest Snapshot</b></span>
+                </div>
+
+                <div class="cfg-account-row">
+                  <span class="cfg-label">单账号比例</span>
+                  <strong id="cfgRuleAccount">—</strong>
+                  <span class="cfg-static">全局 100%</span>
+                  <span class="cfg-chip cfg-chip-muted">待接入</span>
+                </div>
+
+                <div class="cfg-pair">
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="copyMinOdds">最低跟单水位</label>
+                    <input id="copyMinOdds" name="min_odds" type="number" step="0.001" min="0.001" placeholder="留空 = 不限" inputmode="decimal">
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-label" for="copyMaxOdds">最高跟单水位</label>
+                    <input id="copyMaxOdds" name="max_odds" type="number" step="0.001" min="0.001" placeholder="留空 = 不限" inputmode="decimal">
+                  </div>
+                </div>
+
+              </div>
+            </section>
+
+          </div>
+
+          <div class="cfg-col">
+            <section class="cfg-panel">
+              <header class="cfg-head">
+                <span class="cfg-mark" aria-hidden="true"></span>
+                <h2>消息通知配置</h2>
+                <span class="cfg-chip cfg-chip-muted">待接入</span>
+              </header>
+              <div class="cfg-body">
+                <div class="cfg-subgrid">
+                  <div class="cfg-sub">
+                    <h3>机器人凭证</h3>
+                    <div class="cfg-switchrow cfg-switchrow-compact">
+                      <div class="cfg-switchcopy"><strong>启用来单推送</strong><small>后台抓到来单后立即推送</small></div>
+                      <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                    </div>
+                    <div class="cfg-field"><span class="cfg-label">BOT TOKEN</span><input placeholder="输入新 Token（留空则保留）" disabled data-static></div>
+                    <div class="cfg-field"><span class="cfg-label">CHAT ID</span><input placeholder="-1001234567890" disabled data-static></div>
+                    <div class="cfg-field"><span class="cfg-label">代理（可选）</span><input placeholder="socks5://127.0.0.1:7890" disabled data-static></div>
+                  </div>
+                  <div class="cfg-sub">
+                    <h3>后台订单推送</h3>
+                    <div class="cfg-switchrow cfg-switchrow-compact">
+                      <div class="cfg-switchcopy"><strong>只推后台订单</strong><small>仅发送后台原单，不含会员状态</small></div>
+                      <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                    </div>
+                    <div class="cfg-field"><span class="cfg-label">后台订单 BOT TOKEN</span><input placeholder="输入新的机器人 Token" disabled data-static></div>
+                    <div class="cfg-field"><span class="cfg-label">CHAT ID</span><input placeholder="-1001234567890" disabled data-static></div>
+                    <div class="cfg-field"><span class="cfg-label">代理（可选）</span><input placeholder="socks5://..." disabled data-static></div>
+                  </div>
+                </div>
+
+                <div class="cfg-btnrow">
+                  <button type="button" class="button ghost" disabled>保存配置</button>
+                  <button type="button" class="button ghost" disabled>测试机器人</button>
+                  <button type="button" class="button ghost" disabled>测试后台订单</button>
+                  <button type="button" class="button ghost" disabled>清除当前配置</button>
+                </div>
+
+                <div class="cfg-inline">
+                  <span class="cfg-mark-sm" aria-hidden="true"></span>
+                  <strong>PS3838 新单推送</strong>
+                  <span class="cfg-chip cfg-chip-muted">未接入</span>
+                  <span class="cfg-link">展开配置</span>
+                </div>
+
+                <h3 class="cfg-subtitle">通知配置状态</h3>
+                <div class="cfg-chips">
+                  <div class="cfg-status"><span>机器人认证</span><b>未接入</b></div>
+                  <div class="cfg-status"><span>主接收会话</span><b>未接入</b></div>
+                  <div class="cfg-status"><span>代理通道</span><b>未接入</b></div>
+                  <div class="cfg-status"><span>后台订单</span><b>未接入</b></div>
+                </div>
+
+                <h3 class="cfg-subtitle">后台订单推送说明</h3>
+                <div class="cfg-note">接入后显示推送规则、重试与状态。</div>
+              </div>
+            </section>
+          </div>
+
+          <div class="cfg-col cfg-col-wide">
+            <section class="cfg-panel">
+              <header class="cfg-head">
+                <span class="cfg-mark" aria-hidden="true"></span>
+                <h2>TG 信号接入</h2>
+                <span class="cfg-chip cfg-chip-muted">待接入</span>
+              </header>
+              <div class="cfg-body">
+                <div class="cfg-chips cfg-chips-4">
+                  <div class="cfg-status"><span>API 状态</span><b>未接入</b></div>
+                  <div class="cfg-status"><span>Telegram 登录</span><b>未登录</b></div>
+                  <div class="cfg-status"><span>监听来源</span><b>未保存</b></div>
+                  <div class="cfg-status"><span>监听状态</span><b>已关闭</b></div>
+                </div>
+
+                <div class="cfg-subgrid cfg-subgrid-3">
+                  <div class="cfg-sub">
+                    <h3>账号连接</h3>
+                    <button type="button" class="button ghost cfg-full" disabled>连接 Telegram</button>
+                    <div class="cfg-field"><span class="cfg-label">手机号</span><input placeholder="+国家区号 手机号" disabled data-static></div>
+                    <button type="button" class="button ghost cfg-full" disabled>发送验证码</button>
+                    <div class="cfg-field"><span class="cfg-label">验证码</span><input placeholder="Telegram 验证码" disabled data-static></div>
+                    <div class="cfg-field"><span class="cfg-label">二次验证密码</span><input placeholder="没有可留空" disabled data-static></div>
+                    <button type="button" class="button primary cfg-full" disabled>验证并登录</button>
+                  </div>
+                  <div class="cfg-sub">
+                    <h3>信号来源</h3>
+                    <div class="cfg-field"><span class="cfg-label">监听来源配置</span><input placeholder="搜索群组、频道或 ID" disabled data-static></div>
+                    <div class="cfg-note">登录后可读取可用群组。</div>
+                  </div>
+                  <div class="cfg-sub">
+                    <h3>运行控制</h3>
+                    <div class="cfg-btncol">
+                      <button type="button" class="button ghost" disabled>干跑检查</button>
+                      <div class="cfg-switchrow cfg-switchrow-compact">
+                        <div class="cfg-switchcopy"><strong>自动跟单</strong><small>接入后生效</small></div>
+                        <label class="cfg-switch cfg-switch-sm"><input type="checkbox" disabled data-static><span></span></label>
+                      </div>
+                      <button type="button" class="button ghost" disabled>启动监听</button>
+                      <button type="button" class="button ghost" disabled>停止监听</button>
+                    </div>
+                  </div>
+                </div>
+
+                <h3 class="cfg-subtitle">实时记录 <span class="cfg-chip cfg-chip-muted">信号解析日志</span></h3>
+                <div class="cfg-table-wrap">
+                  <table class="cfg-table">
+                    <thead><tr><th>时间</th><th>来源</th><th>状态</th><th>比赛 / 盘口</th><th>金额</th><th>说明</th></tr></thead>
+                    <tbody><tr><td colspan="6" class="cfg-empty">接入后显示信号解析记录</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </div>
+        </form>
+
+
+      </div>
+      <dialog id="settingsSystemDialog" class="cfg-dialog" aria-labelledby="settingsSystemTitle">
+        <header class="cfg-dialog-head">
+          <div>
+            <span class="cfg-kicker">SYSTEM</span>
+            <h2 id="settingsSystemTitle">系统与存储</h2>
+          </div>
+          <button id="settingsSystemClose" class="button ghost" type="button">关闭</button>
+        </header>
+        <div class="cfg-dialog-body">
+              <div class="settings-grid">
+              <section class="settings-panel" aria-labelledby="settingsCollectTitle">
+                <header class="settings-panel-head">
+                  <span class="settings-mark" aria-hidden="true"></span>
+                  <h2 id="settingsCollectTitle">采集策略</h2>
+                  <span class="settings-tag">只读</span>
+                </header>
+                <div id="settingsCollectFields" class="settings-fields"></div>
+                <p class="settings-hint">修改需编辑根目录 config.json 后重启服务；页面只展示当前生效值。</p>
+              </section>
+
+              <section class="settings-panel" aria-labelledby="settingsStoreTitle">
+                <header class="settings-panel-head">
+                  <span class="settings-mark" aria-hidden="true"></span>
+                  <h2 id="settingsStoreTitle">数据与存储</h2>
+                  <span id="settingsDbTag" class="settings-tag">本机</span>
+                </header>
+                <div id="settingsStoreFields" class="settings-fields"></div>
+                <div id="settingsCounts" class="settings-counts"></div>
+              </section>
+
+              <section class="settings-panel" aria-labelledby="settingsSessionTitle">
+                <header class="settings-panel-head">
+                  <span class="settings-mark" aria-hidden="true"></span>
+                  <h2 id="settingsSessionTitle">会话与运行</h2>
+                  <span id="settingsSessionTag" class="settings-tag">—</span>
+                </header>
+                <div id="settingsSessionFields" class="settings-fields"></div>
+                <div class="settings-actions">
+                  <button class="button primary" type="button" data-nav-action="refresh">立即刷新</button>
+                  <button class="button ghost" type="button" data-nav-action="backfill">补历史</button>
+                  <button class="button ghost" type="button" data-nav-action="relogin">重新登录</button>
+                  <button class="button ghost" type="button" data-nav-action="open-login">登录后台</button>
+                </div>
+              </section>
+            </div>
+        </div>
+      </dialog>
     </section>
 
+    <footer class="app-statusbar" aria-label="系统运行状态">
+      <span id="statusbarHealth" class="statusbar-item statusbar-health" data-tone="ok">
+        <i class="statusbar-dot" aria-hidden="true"></i>
+        <b>系统运行中</b>
+      </span>
+      <span class="statusbar-item">系统时间 <b id="statusbarTime" class="statusbar-mono">--:--:--</b></span>
+      <span class="statusbar-item">运行时长 <b id="statusbarUptime" class="statusbar-mono">--</b></span>
+      <span class="statusbar-item">版本号 <b id="statusbarVersion" class="statusbar-mono">未提供</b></span>
+      <span id="statusbarSync" class="statusbar-item statusbar-sync" data-tone="ok">
+        <i class="statusbar-dot" aria-hidden="true"></i>
+        <b>数据同步正常</b>
+      </span>
+    </footer>
   </div>
 
   <dialog id="mergeDialog" class="merge-dialog" aria-labelledby="mergeDialogTitle">
@@ -537,6 +888,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="static/app.js?v=20261103-25"></script>
+  <script type="module" src="static/app.js?v=20261103-34"></script>
 </body>
 </html>

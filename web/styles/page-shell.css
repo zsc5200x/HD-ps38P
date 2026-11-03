@@ -184,3 +184,136 @@
     min-height: 300px;
   }
 }
+
+/* ── bounded viewport shell ───────────────────────────────────────────────
+   Desktop pins the top bar, the page title bar and the bottom status bar.
+   The active page then fills the remaining height and scrolls inside that
+   box, so the document itself never grows past the viewport. Narrow
+   viewports keep the normal document flow for stacked content. */
+@media (min-width: 901px) {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    overflow: hidden;
+  }
+
+  .app-shell {
+    display: flex;
+    height: 100dvh;
+    min-height: 0;
+    flex-direction: column;
+    padding: 14px 0 10px;
+  }
+
+  .topbar,
+  .app-page-bar,
+  .app-statusbar {
+    flex: 0 0 auto;
+  }
+
+  .page-view[data-page-panel] {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .copy-page.shell-page {
+    min-height: 0;
+  }
+
+  .copy-page[data-page-panel] {
+    overflow: hidden;
+  }
+}
+
+/* ── shared application status bar ────────────────────────────────────────
+   Same row as the reference console: health on the left, clock / uptime /
+   version in the middle and the data-sync indicator on the right. */
+.app-statusbar {
+  display: grid;
+  grid-template-columns:
+    minmax(170px, 1.1fr) minmax(150px, 1fr) minmax(140px, 0.9fr)
+    minmax(130px, 0.85fr) minmax(170px, 1fr);
+  align-items: center;
+  gap: 12px;
+  height: 34px;
+  margin: 8px 1px 0;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(9, 15, 25, 0.92);
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.statusbar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.statusbar-item b {
+  color: var(--text-soft);
+  font-weight: 550;
+}
+
+.statusbar-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.statusbar-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.statusbar-health,
+.statusbar-sync {
+  color: var(--accent);
+}
+
+.statusbar-sync {
+  justify-self: end;
+}
+
+.statusbar-health[data-tone="warn"],
+.statusbar-sync[data-tone="warn"] {
+  color: var(--warning);
+}
+
+.statusbar-health[data-tone="error"],
+.statusbar-sync[data-tone="error"] {
+  color: var(--danger);
+}
+
+.statusbar-health[data-tone="idle"],
+.statusbar-sync[data-tone="idle"] {
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .app-statusbar {
+    display: flex;
+    flex-wrap: wrap;
+    height: auto;
+    gap: 4px 14px;
+    padding: 8px 12px;
+  }
+
+  .statusbar-sync {
+    justify-self: auto;
+  }
+}

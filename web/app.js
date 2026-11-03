@@ -4,6 +4,8 @@ import { bindMyEventsEvents } from "./modules/my-events/bindings.js";
 import { pollMyEventsEvents } from "./modules/my-events/page.js";
 import { bindTopNav } from "./modules/nav.js";
 import { bindPoolEvents } from "./modules/pool.js";
+import { bindSettingsEvents } from "./modules/settings/page.js";
+import { bindStatusbar } from "./modules/statusbar.js";
 import { refreshCollectorStatus } from "./modules/status.js";
 
 bindTopNav();
@@ -11,6 +13,9 @@ bindMergeEvents();
 bindMyEventsEvents();
 bindPoolEvents();
 bindCopyEvents();
+bindSettingsEvents();
+bindStatusbar();
+refreshCollectorStatus();
 
 window.setInterval(() => {
   if (!document.hidden) pollMyEventsEvents();
