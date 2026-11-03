@@ -140,7 +140,13 @@ async function loadMerge({ silent = false } = {}) {
     }
     if (payload.ready === false) {
       mergeBuildPending = payload.refreshing === true;
-      if (!data) {
+      const hasSavedMappings = (payload.mappings || []).length > 0
+        || (payload.leagueMappings || []).length > 0;
+      if (hasSavedMappings) {
+        data = payload;
+        if (payload.sources?.crown?.ok === false) matchView = "merged";
+        renderAll();
+      } else if (!data) {
         renderLoading(payload.error || "正在准备赛事匹配数据…");
       }
       if (payload.error) showNotice(payload.error);
@@ -150,6 +156,9 @@ async function loadMerge({ silent = false } = {}) {
     }
     data = payload;
     mergeBuildPending = payload.refreshing === true;
+    if ((payload.mappings || []).length && payload.sources?.crown?.ok === false) {
+      matchView = "merged";
+    }
     renderAll();
     scheduleMergePoll(payload);
     return payload;
@@ -233,7 +242,7 @@ function renderStatus() {
 
   if (data?.crownError) {
     showNotice(`${data.crownError} 皇冠数据恢复后点「刷新」重试。`);
-  } else if (data && crown && crown.count === 0) {
+  } else if (data && !mergeBuildPending && crown && crown.count === 0) {
     showNotice("皇冠服务已连接，但当前没有赛事。");
   } else if (ps38?.warning) {
     showNotice(`${ps38.warning} 待匹配列表只使用当前赛事，请恢复采集后重新拉取。`);

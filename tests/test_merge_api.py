@@ -215,6 +215,10 @@ class MergeApiTests(unittest.TestCase):
     def test_cold_merge_request_returns_quickly_and_builds_only_once(self):
         self.reset_cache()
         self.server.merge_service.invalidate_payload()
+        saved = self.server.merge_service.store.map_events(
+            {"id": "pin:saved", "name": "旧主队 vs 旧客队"},
+            {"id": "crown:saved", "name": "旧主队 vs 旧客队"},
+        )
         entered = threading.Event()
         release = threading.Event()
 
@@ -224,25 +228,41 @@ class MergeApiTests(unittest.TestCase):
             return [CROWN_RAW], None, store.now_iso()
 
         with mock.patch("ps38app.fixture_merge.fetch_crown_events", side_effect=slow_crown_fetch) as fetch:
-            started = time.monotonic()
-            status, initial = self.request("GET", "/api/merge", wait_merge=False)
-            self.assertEqual(status, 200)
-            self.assertFalse(initial["ready"])
-            self.assertTrue(initial["refreshing"])
-            self.assertLess(time.monotonic() - started, 0.5)
-            self.assertTrue(entered.wait(timeout=1))
+            try:
+                started = time.monotonic()
+                status, initial = self.request("GET", "/api/merge", wait_merge=False)
+                self.assertEqual(status, 200)
+                self.assertFalse(initial["ready"])
+                self.assertTrue(initial["refreshing"])
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertEqual(initial["counts"]["fixtureMappings"], 1)
+                self.assertEqual(
+                    [(item["ps38Id"], item["crownId"]) for item in initial["mappings"]],
+                    [(saved["ps38Id"], saved["crownId"])],
+                )
+                self.assertTrue(entered.wait(timeout=1))
 
-            status, repeated = self.request("GET", "/api/merge", wait_merge=False)
-            self.assertEqual(status, 200)
-            self.assertFalse(repeated["ready"])
-            self.assertEqual(fetch.call_count, 1)
+                status, repeated = self.request("GET", "/api/merge", wait_merge=False)
+                self.assertEqual(status, 200)
+                self.assertFalse(repeated["ready"])
+                self.assertEqual(
+                    [(item["ps38Id"], item["crownId"]) for item in repeated["mappings"]],
+                    [(saved["ps38Id"], saved["crownId"])],
+                )
+                self.assertEqual(fetch.call_count, 1)
 
-            release.set()
-            status, ready = self.request("GET", "/api/merge")
-            self.assertEqual(status, 200)
-            self.assertTrue(ready["ready"])
-            self.assertFalse(ready["refreshing"])
-            self.assertEqual(ready["crownEvents"][0]["id"], "crown-1")
+                release.set()
+                status, ready = self.request("GET", "/api/merge")
+                self.assertEqual(status, 200)
+                self.assertTrue(ready["ready"])
+                self.assertFalse(ready["refreshing"])
+                self.assertEqual(ready["crownEvents"][0]["id"], "crown-1")
+                self.assertEqual(
+                    [(item["ps38Id"], item["crownId"]) for item in ready["mappings"]],
+                    [(saved["ps38Id"], saved["crownId"])],
+                )
+            finally:
+                release.set()
 
     def test_auto_merge_is_explicit_and_unique(self):
         self.reset_cache()

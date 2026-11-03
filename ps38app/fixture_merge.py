@@ -1311,12 +1311,36 @@ class MergeService:
                     name="merge-payload-refresh",
                     daemon=True,
                 ).start()
-            if cached is None:
-                payload = self._loading_payload()
-                if self._payload_error:
-                    payload.update({"refreshing": False, "error": self._payload_error})
-                return payload
-            return {**cached, "ready": True, "refreshing": self._payload_building}
+            building = self._payload_building
+            error = self._payload_error
+        if cached is None:
+            payload = self._saved_mapping_payload()
+            with self._payload_lock:
+                # The async catalog build may finish while the local snapshot is read.
+                cached = self._payload_cache
+                building = self._payload_building
+                error = self._payload_error
+            if cached is not None:
+                return {**cached, "ready": True, "refreshing": building}
+            payload["refreshing"] = building
+            if error:
+                payload.update({"refreshing": False, "error": error})
+            return payload
+        return {**cached, "ready": True, "refreshing": building}
+
+    def _saved_mapping_payload(self) -> Dict[str, Any]:
+        """Return durable mappings without waiting for either live event source."""
+        payload = self._loading_payload()
+        with self._mapping_lock:
+            league_mappings = self.store.list_league_mappings()
+            mappings = self.store.list_mappings()
+        payload["leagueMappings"] = league_mappings
+        payload["mappings"] = mappings
+        payload["counts"] = {
+            "leagueMappings": len(league_mappings),
+            "fixtureMappings": len(mappings),
+        }
+        return payload
 
     def _build_payload(self, generation: int) -> None:
         payload = None

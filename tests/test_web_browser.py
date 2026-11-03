@@ -202,38 +202,63 @@ class WebBrowserTests(unittest.TestCase):
             "aria-pressed", "true"
         )
 
-    def test_merge_cold_response_waits_for_ready_data_before_showing_empty_state(self):
-        self.merge_response_sequence = [
-            {"ok": True, "ready": False, "refreshing": True},
-            {
-                "ok": True,
-                "ready": True,
-                "refreshing": False,
-                "generatedAt": "2026-11-04T12:00:00+08:00",
-                "sources": {
-                    "ps38": {"ok": True, "count": 1, "leagueCount": 1},
-                    "crown": {"ok": True, "count": 1, "leagueCount": 1},
-                },
-                "counts": {"leagueMappings": 0, "fixtureMappings": 0},
-                "ps38Events": [],
-                "crownEvents": [],
-                "ps38Leagues": [],
-                "crownLeagues": [],
-                "leagueMappings": [],
-                "mappings": [],
-                "leagueSuggestions": [],
-                "suggestions": [],
+    def test_merge_cold_saved_mappings_are_visible_before_ready_data(self):
+        mapping = {
+            "ps38Id": "pin:old",
+            "crownId": "crown:old",
+            "updatedAt": "2026-11-01T12:00:00+08:00",
+            "ps38Snapshot": {
+                "id": "pin:old", "league": "旧平博联赛",
+                "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
             },
-        ]
+            "crownSnapshot": {
+                "id": "crown:old", "league": "旧皇冠联赛",
+                "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+            },
+        }
+        loading = {
+            "ok": True,
+            "ready": False,
+            "refreshing": True,
+            "sources": {
+                "ps38": {"ok": False, "count": 0, "leagueCount": 0},
+                "crown": {"ok": False, "count": 0, "leagueCount": 0},
+            },
+            "counts": {"leagueMappings": 0, "fixtureMappings": 1},
+            "ps38Events": [],
+            "crownEvents": [],
+            "ps38Leagues": [],
+            "crownLeagues": [],
+            "leagueMappings": [],
+            "mappings": [mapping],
+            "leagueSuggestions": [],
+            "suggestions": [],
+        }
+        ready = {
+            **loading,
+            "ready": True,
+            "refreshing": False,
+            "generatedAt": "2026-11-04T12:00:00+08:00",
+            "sources": {
+                "ps38": {"ok": True, "count": 1, "leagueCount": 1},
+                "crown": {"ok": True, "count": 1, "leagueCount": 1},
+            },
+            "counts": {"leagueMappings": 0, "fixtureMappings": 1},
+        }
+        self.merge_response_sequence = [loading]
         self.page.goto(f"{self.origin}/#/merge")
         fixtures = self.page.locator("#mergeFixtures")
-        self.expect(fixtures).to_contain_text("正在准备赛事匹配数据…")
-        self.expect(fixtures).not_to_contain_text("当前暂无皇冠比赛")
+        merged_tab = self.page.locator('[data-merge-view="merged"]')
+        self.expect(merged_tab).to_have_text("已合并 1")
+        self.expect(self.page.locator("#mergeUpdated")).to_have_text("后台正在准备赛事数据…")
+        self.expect(fixtures).to_contain_text("旧皇冠联赛")
+        self.expect(fixtures).to_contain_text("旧平博联赛")
+        self.expect(fixtures).to_contain_text("主队 vs 客队")
         self.expect(self.page.locator("#mergeAuto")).to_be_disabled()
 
+        self.merge_response_sequence = [ready]
         self.expect(self.page.locator("#mergeUpdated")).to_have_text("更新 12:00:00")
-        self.assertEqual(self.merge_request_count, 2)
-        self.expect(fixtures).to_contain_text("当前暂无皇冠比赛")
+        self.assertGreaterEqual(self.merge_request_count, 2)
         self.expect(self.page.locator("#mergeAuto")).to_be_enabled()
 
     def test_merge_stops_cold_start_polling_after_leaving_page(self):
