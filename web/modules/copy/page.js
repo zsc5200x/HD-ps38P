@@ -202,6 +202,15 @@ function formatDuration(seconds) {
   return `${Math.floor(minutes / 60)} 小时 ${String(minutes % 60).padStart(2, "0")} 分`;
 }
 
+function attemptDuration(item) {
+  const start = new Date(item.started_at || item.created_at).getTime();
+  if (!Number.isFinite(start)) return "—";
+  if (!item.finished_at) return "进行中";
+  const end = new Date(item.finished_at).getTime();
+  if (!Number.isFinite(end) || end < start) return "—";
+  return formatDuration((end - start) / 1000);
+}
+
 function rowSeconds(row) {
   const start = new Date(row.created_at).getTime();
   const end = new Date(row.updated_at || row.created_at).getTime();
@@ -821,7 +830,18 @@ function renderDetail(payload, draft = null) {
     detailFact("创建时间", date(row.created_at)), detailFact("更新时间", date(row.updated_at)),
   );
   const members = (payload.members || []).map((item) => [item.order_id, item.member_user_code || item.member_code || item.member_identity, `${number(item.stake)} ${item.currency || row.currency || ""}`, item.reported_currency || item.currency || row.currency || "—", item.selection || sideLabels[item.side], date(item.created_at || item.created_ms)]);
-  const attempts = (payload.attempts || []).map((item) => [date(item.created_at || item.started_at), accountName(item.account_id || row.account_id), item.resolution === "manual" ? `人工核对 · ${statusText(item.status)}` : statusText(item.status), item.receipt_id || "—", item.category || item.error_category || "—", item.message || "—"]);
+  const attempts = (payload.attempts || []).map((item) => [
+    date(item.started_at || item.created_at),
+    item.finished_at ? date(item.finished_at) : "进行中",
+    attemptDuration(item),
+    accountName(item.account_id || row.account_id),
+    item.resolution === "manual" ? `人工核对 · ${statusText(item.status)}` : statusText(item.status),
+    item.receipt_id || "—",
+    item.error_code || "—",
+    item.request_sent === true ? "已发送" : item.request_sent === false ? "未发送" : "未知",
+    item.category || item.error_category || "—",
+    item.message || "—",
+  ]);
   const history = (payload.history || []).map((item) => [date(item.at), `${statusText(item.from_status)} → ${statusText(item.to_status)}`, item.kind, item.message]);
   const methods = { automatic: "自动核对", requested: "手动触发只读核对", manual: "人工登记" };
   const reconciliations = (payload.reconciliations || []).map((item) => [date(item.at), methods[item.method] || display(item.method), statusText(item.status), item.receipt_id, item.note || item.message]);
@@ -829,7 +849,7 @@ function renderDetail(payload, draft = null) {
   if (effectiveStatus(row) === "UNKNOWN") content.append(unknownActions(row, draft));
   content.append(
     detailTable(`来源订单 · ${members.length} 笔`, ["原单号", "会员", "计入金额", "后台币种标签", "方向", "源单时间"], members),
-    detailTable("提交尝试", ["时间", "账号", "状态", "回执号", "错误分类", "说明"], attempts),
+    detailTable("提交尝试", ["开始时间", "结束时间", "耗时", "账号", "状态", "回执号", "平台错误码", "请求发送", "错误分类", "说明"], attempts),
     detailTable("状态历史", ["时间", "状态变化", "分类", "说明"], history),
     detailTable("核对审计", ["时间", "方式", "结果", "票号", "依据 / 说明"], reconciliations));
   setDetailBusy(state.detailBusy);

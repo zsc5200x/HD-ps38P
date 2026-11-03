@@ -54,6 +54,7 @@ class FollowBrowserTests(unittest.TestCase):
         self.hold_action = None
         self.reconciliations = {}
         self.history = {}
+        self.attempts = {}
         self.rule = {
             "enabled": False,
             "direction": "reverse",
@@ -229,7 +230,7 @@ class FollowBrowserTests(unittest.TestCase):
                             "created_at": "2026-11-03T08:00:00+08:00",
                         }
                     ],
-                    "attempts": [],
+                    "attempts": self.attempts.get(group_id, []),
                     "history": self.history.get(group_id, []),
                     "reconciliations": self.reconciliations.get(group_id, []),
                 }
@@ -396,6 +397,34 @@ class FollowBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#copyDetailContent")).to_contain_text("自动核对")
         self.expect(self.page.locator("#copyDetailContent")).to_contain_text("2 / 1 / 3")
         self.expect(self.page.locator("#copyResolutionForm")).to_have_count(0)
+
+    def test_submission_attempt_detail_shows_timing_platform_error_and_request_state(self):
+        self.attempts["success-1"] = [
+            {
+                "started_at": "2026-11-03T08:00:20+08:00",
+                "finished_at": "2026-11-03T08:00:23+08:00",
+                "account_id": "crown-local",
+                "status": "REJECTED",
+                "receipt_id": None,
+                "error_code": "1X001",
+                "request_sent": True,
+                "category": "INSUFFICIENT_FUNDS",
+                "message": "余额不足，平台拒绝提交",
+            }
+        ]
+        self.open_page()
+        self.page.locator('[data-copy-detail="success-1"]').click()
+        attempts = self.page.locator(".copy-detail-section").filter(has=self.page.get_by_role("heading", name="提交尝试"))
+        self.expect(attempts).to_contain_text("开始时间")
+        self.expect(attempts).to_contain_text("结束时间")
+        self.expect(attempts).to_contain_text("耗时")
+        self.expect(attempts).to_contain_text("08:00:20")
+        self.expect(attempts).to_contain_text("08:00:23")
+        self.expect(attempts).to_contain_text("3 秒")
+        self.expect(attempts).to_contain_text("1X001")
+        self.expect(attempts).to_contain_text("已发送")
+        self.expect(attempts).to_contain_text("INSUFFICIENT_FUNDS")
+        self.expect(attempts).to_contain_text("余额不足，平台拒绝提交")
 
     def test_read_only_reconcile_has_audit_and_updates_status_without_resubmit(self):
         self.open_unknown_detail()
