@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-label="HD PS38 Sports">
+  <defs>
+    <linearGradient id="hdRing" x1="4" y1="2" x2="36" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8CF7CE"/>
+      <stop offset=".55" stop-color="#42E6A4"/>
+      <stop offset="1" stop-color="#1FA8FF"/>
+    </linearGradient>
+    <linearGradient id="hdBody" x1="20" y1="2" x2="20" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#172A42"/>
+      <stop offset="1" stop-color="#0A1220"/>
+    </linearGradient>
+    <linearGradient id="hdInk" x1="10" y1="12" x2="30" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2FBF7"/>
+      <stop offset="1" stop-color="#9EF8D4"/>
+    </linearGradient>
+  </defs>
+  <path d="M20 2.4 34.6 9.8v14.4L20 37.6 5.4 24.2V9.8L20 2.4Z"
+        fill="url(#hdBody)" stroke="url(#hdRing)" stroke-width="1.7" stroke-linejoin="round"/>
+  <path d="M10.2 13.2v13.6M10.2 20h6.8M17 13.2v13.6"
+        fill="none" stroke="url(#hdInk)" stroke-width="2.7" stroke-linecap="round"/>
+  <path d="M21.6 26.6V13.4h2.6a6.6 6.6 0 0 1 0 13.2h-2.6"
+        fill="none" stroke="url(#hdRing)" stroke-width="2.2" stroke-linecap="round"/>
+</svg>

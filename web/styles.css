@@ -1,0 +1,57 @@
+/* Keep imports in this order: later modules preserve the original cascade. */
+@import url("./styles/base.css?v=20261103-1");
+@import url("./styles/dashboard.css?v=20261103-1");
+@import url("./styles/feedback.css?v=20261103-1");
+@import url("./styles/responsive.css?v=20261103-1");
+@import url("./styles/my-events.css?v=20261103-1");
+@import url("./styles/top-nav.css?v=20261103-3");
+@import url("./styles/page-shell.css?v=20261103-4");
+@import url("./styles/account-pool.css?v=20261103-22");
+@import url("./styles/merge.css?v=20261103-6");
+
+/* ── standalone shell additions ───────────────────────────────────────── */
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: inline-flex;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  filter: drop-shadow(0 6px 14px rgba(66, 230, 164, 0.18));
+}
+
+.brand-mark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.brand-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.brand h1 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 1.06rem;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.brand h1 em {
+  font-style: normal;
+  font-weight: 650;
+  color: var(--accent);
+}

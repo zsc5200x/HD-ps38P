@@ -1,0 +1,391 @@
+@media (max-width: 1180px) {
+  .change-feed {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .history-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .odds-table th:nth-child(7),
+  .odds-table td:nth-child(7) {
+    display: none;
+  }
+  .odds-table th:nth-child(8) { width: 21%; }
+}
+
+@media (max-width: 920px) {
+  .app-shell {
+    width: min(100% - 20px, 820px);
+    padding-top: 12px;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-bottom: 14px;
+  }
+
+  .topbar-center {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+    padding-top: 2px;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .events-panel {
+    max-height: 390px;
+    min-height: 310px;
+  }
+
+  .event-list {
+    max-height: 220px;
+  }
+
+  .selected-panel {
+    align-items: flex-start;
+  }
+
+  .settings-parameter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-account-pool {
+    min-height: 160px;
+    padding-top: 18px;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .settings-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .app-shell {
+    width: calc(100% - 16px);
+  }
+
+  .topbar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding-bottom: 14px;
+  }
+
+  .primary-nav {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: center;
+    width: 100%;
+    max-width: 340px;
+  }
+
+  .page-nav-button {
+    flex: 1;
+  }
+
+  .topbar-actions {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .button {
+    min-width: 44px;
+    min-height: 44px;
+    padding-inline: 10px;
+  }
+
+  .search-field {
+    min-height: 44px;
+  }
+
+  .search-field input {
+    min-height: 42px;
+  }
+
+  .filter-chip,
+  .market-tab {
+    min-height: 44px;
+    padding-inline: 11px;
+  }
+
+  .metadata-maintenance-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .metadata-maintenance-actions {
+    width: 100%;
+  }
+
+  .metadata-maintenance-actions .button {
+    min-width: 0;
+    min-height: 44px;
+    flex: 1;
+  }
+
+  .metadata-sync-detail {
+    white-space: normal;
+  }
+
+  .compact-select select {
+    height: 44px;
+    max-width: 96px;
+  }
+
+  .button span {
+    display: none;
+  }
+
+  .button svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .metrics-grid {
+    gap: 7px;
+  }
+
+  .metric-card {
+    padding: 11px 12px;
+  }
+
+  .metric-head {
+    margin-bottom: 6px;
+  }
+
+  .metric-foot {
+    gap: 8px;
+    font-size: 0.58rem;
+  }
+
+  .selected-panel {
+    flex-direction: column;
+    gap: 14px;
+    padding: 15px;
+  }
+
+  .selected-copy h2 {
+    white-space: normal;
+  }
+
+  .selected-stats {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .history-panel,
+  .changes-panel,
+  .odds-panel {
+    padding: 14px 12px;
+  }
+
+  .history-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .history-controls {
+    justify-content: stretch;
+  }
+
+  .history-row-select {
+    flex: 1;
+  }
+
+  .history-row-select select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .history-status-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .history-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .history-summary div:last-child {
+    grid-column: span 2;
+  }
+
+  .history-chart-shell,
+  .history-chart {
+    min-height: 220px;
+    height: 220px;
+  }
+
+  .icon-button {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+
+  .section-heading {
+    align-items: flex-start;
+  }
+
+  .odds-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .market-tabs {
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .market-tab {
+    flex: 1;
+  }
+
+  .change-feed {
+    grid-template-columns: 1fr;
+  }
+
+  .table-wrap {
+    border: 0;
+    background: transparent;
+  }
+
+  .odds-table,
+  .odds-table tbody,
+  .odds-table tr,
+  .odds-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .odds-table thead {
+    display: none;
+  }
+
+  .odds-table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .odds-table tbody tr {
+    display: grid;
+    grid-template-columns: 1.1fr 0.8fr 1fr 1fr;
+    gap: 10px 8px;
+    padding: 11px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(8, 13, 22, 0.32);
+  }
+
+  .odds-table td {
+    padding: 0;
+    border: 0;
+  }
+
+  .odds-table td::before {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted-2);
+    font-family: var(--font-sans);
+    font-size: 0.54rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    content: attr(data-label);
+  }
+
+  .odds-table td:nth-child(1) {
+    grid-column: span 2;
+  }
+
+  .odds-table td:nth-child(2),
+  .odds-table td:nth-child(3) {
+    grid-column: span 1;
+  }
+
+  .odds-table td:nth-child(4),
+  .odds-table td:nth-child(5) {
+    grid-column: span 2;
+  }
+
+  .odds-table td:nth-child(6) {
+    grid-column: span 2;
+  }
+
+  .odds-table td:nth-child(7) {
+    display: block;
+    grid-column: span 2;
+  }
+
+  .odds-table td:nth-child(8) {
+    grid-column: span 4;
+  }
+
+  .time-cell {
+    white-space: normal;
+  }
+
+  .table-empty {
+    display: block !important;
+    grid-column: 1 / -1;
+  }
+
+  .footer-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .settings-heading,
+  .settings-section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-heading-actions,
+  .settings-maintenance-actions {
+    justify-content: stretch;
+  }
+
+  .settings-heading-actions .button,
+  .settings-maintenance-actions .button {
+    flex: 1;
+  }
+
+  .settings-save-status,
+  .settings-section-meta {
+    white-space: normal;
+  }
+
+  .settings-status-tools {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .settings-status-tools > .settings-section-meta {
+    align-self: flex-end;
+  }
+
+  .settings-form-grid,
+  .settings-status-grid,
+  .settings-paths,
+  .settings-readonly-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-section {
+    padding: 14px 12px;
+  }
+}

@@ -1,0 +1,11 @@
+.venv/
+.playwright-browsers/
+.playwright-mcp/
+.ruff_cache/
+.pytest_cache/
+screenshots/
+__pycache__/
+*.pyc
+config.json
+data/
+.DS_Store

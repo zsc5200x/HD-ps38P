@@ -1,0 +1,18 @@
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+extend-exclude = [
+    ".playwright-mcp",
+    ".playwright-browsers",
+    "data",
+]
+
+[tool.ruff.lint]
+# Keep the first quality gate focused on correctness; expand after existing
+# code has been reviewed for style-only changes.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

@@ -1,0 +1,73 @@
+.footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 5px 0;
+  color: var(--muted-2);
+  font-family: var(--font-mono);
+  font-size: 0.61rem;
+}
+
+.source-path {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.source-path span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 10;
+  max-width: min(360px, calc(100vw - 40px));
+  padding: 10px 13px;
+  color: var(--text-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: #172239;
+  box-shadow: var(--shadow);
+  font-size: 0.74rem;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@keyframes sectionReveal {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.52; }
+}
+
+@keyframes rowFlashUp {
+  0% { background: rgba(66, 230, 164, 0.22); }
+  100% { background: transparent; }
+}
+
+@keyframes rowFlashDown {
+  0% { background: rgba(255, 100, 124, 0.21); }
+  100% { background: transparent; }
+}

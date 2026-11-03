@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0f19">
+  <link rel="icon" type="image/svg+xml" href="static/logo.svg?v=1">
+  <title>HD PS38 Sports</title>
+  <link rel="stylesheet" href="static/styles.css?v=20261103-24">
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" focusable="false">
+            <defs>
+              <linearGradient id="brandRing" x1="4" y1="2" x2="36" y2="38" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#8CF7CE"/>
+                <stop offset=".55" stop-color="#42E6A4"/>
+                <stop offset="1" stop-color="#1FA8FF"/>
+              </linearGradient>
+              <linearGradient id="brandBody" x1="20" y1="2" x2="20" y2="38" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#172A42"/>
+                <stop offset="1" stop-color="#0A1220"/>
+              </linearGradient>
+              <linearGradient id="brandInk" x1="10" y1="12" x2="30" y2="28" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#F2FBF7"/>
+                <stop offset="1" stop-color="#9EF8D4"/>
+              </linearGradient>
+            </defs>
+            <path d="M20 2.4 34.6 9.8v14.4L20 37.6 5.4 24.2V9.8L20 2.4Z" fill="url(#brandBody)" stroke="url(#brandRing)" stroke-width="1.7" stroke-linejoin="round"/>
+            <path d="M10.2 13.2v13.6M10.2 20h6.8M17 13.2v13.6" fill="none" stroke="url(#brandInk)" stroke-width="2.7" stroke-linecap="round"/>
+            <path d="M21.6 26.6V13.4h2.6a6.6 6.6 0 0 1 0 13.2h-2.6" fill="none" stroke="url(#brandRing)" stroke-width="2.2" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="brand-copy">
+          <span class="eyebrow">SPORTS EVENTS DESK</span>
+          <h1>HD PS38 <em>Sports</em></h1>
+        </span>
+      </div>
+      <div class="topbar-center">
+        <div class="top-nav">
+          <span id="collectorPill" class="nav-status" title="采集状态">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="collectorPillText">连接中…</span>
+          </span>
+          <span class="nav-divider" aria-hidden="true"></span>
+          <nav class="nav-links" aria-label="主导航">
+            <span class="nav-glider" aria-hidden="true"></span>
+            <a class="nav-link" href="#/home" data-page-link="home" aria-current="page">主页</a>
+            <a class="nav-link" href="#/copy" data-page-link="copy">PS38 跟单</a>
+            <a class="nav-link" href="#/merge" data-page-link="merge">赛事合并</a>
+            <a class="nav-link" href="#/pool" data-page-link="pool">号池管理</a>
+            <a class="nav-link" href="#/settings" data-page-link="settings">设置</a>
+          </nav>
+        </div>
+      </div>
+      <div class="topbar-actions"></div>
+    </header>
+
+    <!-- 公共壳：所有页面共用同一条标题栏，操作按钮随页面切换（样式见 page-shell.css）。 -->
+    <div class="page-shell-bar app-page-bar">
+      <h1 id="appPageTitle" class="page-shell-title" tabindex="-1">主页</h1>
+      <div id="appPageActions" class="page-shell-actions">
+        <div class="page-action-group" data-page-actions="home">
+          <button class="button ghost" type="button" data-nav-action="refresh">刷新</button>
+          <button id="myEventsLogin" class="button primary" type="button" title="把代理后台浏览器窗口弹到前台；已登录时直接切换，不会退出登录">登录后台</button>
+        </div>
+        <div class="page-action-group" data-page-actions="copy" hidden>
+          <a class="button ghost" href="#/home" data-nav-action="home">返回我的赛事</a>
+          <button class="button ghost" type="button" data-nav-action="open-login">登录后台</button>
+        </div>
+        <div class="page-action-group" data-page-actions="merge" hidden>
+          <button id="mergeAuto" class="button primary" type="button" disabled>自动合并</button>
+          <button id="mergeRefresh" class="button ghost" type="button">刷新</button>
+        </div>
+        <div class="page-action-group" data-page-actions="pool" hidden>
+          <button id="poolCheckAll" class="button ghost" type="button">全部检测</button>
+          <button id="poolAdd" class="button primary" type="button">新增账号</button>
+        </div>
+        <div class="page-action-group" data-page-actions="settings" hidden>
+          <button class="button primary" type="button" data-nav-action="refresh">立即刷新</button>
+          <button class="button ghost" type="button" data-nav-action="backfill">补历史</button>
+          <button class="button ghost" type="button" data-nav-action="relogin">重新登录</button>
+          <button class="button ghost" type="button" data-nav-action="open-login">登录后台</button>
+        </div>
+      </div>
+    </div>
+
+    <section id="myEventsPage" class="page-view my-events-page" data-page-panel="home" aria-label="我的赛事" tabindex="-1">
+      <div class="my-events-overview">
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">投注总量</span>
+          <strong id="myEventsTotalStake">--</strong>
+          <span id="myEventsTotalOrders" class="my-events-stat-foot">-- 单</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">已结算输赢</span>
+          <strong id="myEventsNet">--</strong>
+          <span id="myEventsWinLose" class="my-events-stat-foot">赢 -- · 输 --</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">未结算</span>
+          <strong id="myEventsOpenCount">--</strong>
+          <span id="myEventsOpenStake" class="my-events-stat-foot">--</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">已结算</span>
+          <strong id="myEventsSettledCount">--</strong>
+          <span id="myEventsSettledStake" class="my-events-stat-foot">--</span>
+        </article>
+      </div>
+
+      <div id="myEventsAgents" class="my-events-agents" aria-label="各代理投注总量"></div>
+
+      <div class="my-events-toolbar">
+        <div class="my-events-tabs" role="group" aria-label="结算状态">
+          <button class="my-events-tab" type="button" data-my-events-status="OPEN" aria-pressed="false">未结算</button>
+          <button class="my-events-tab" type="button" data-my-events-status="SETTLED" aria-pressed="false">已结算</button>
+          <button class="my-events-tab active" type="button" data-my-events-status="ALL" aria-pressed="true">全部</button>
+        </div>
+        <label class="search-field my-events-search" for="myEventsSearch">
+          <input id="myEventsSearch" type="search" placeholder="搜索联赛、球队、会员、订单号" autocomplete="off" spellcheck="false">
+        </label>
+        <select id="myEventsAgent" class="my-events-select" aria-label="按代理筛选">
+          <option value="">全部代理</option>
+        </select>
+        <div class="my-events-dates">
+          <input id="myEventsFrom" class="my-events-date" type="date" aria-label="开始日期">
+          <span class="my-events-date-sep">至</span>
+          <input id="myEventsTo" class="my-events-date" type="date" aria-label="结束日期">
+        </div>
+        <div class="my-events-quick" role="group" aria-label="快捷日期">
+          <button class="my-events-quick-btn" type="button" data-my-events-range="today">今天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="24">近24小时</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="7">近7天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="30">近30天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="all">全部</button>
+        </div>
+        <span id="myEventsCount" class="my-events-count">-- 单</span>
+      </div>
+
+      <div class="my-events-basis-bar">
+        <span class="my-events-basis-label">统计口径</span>
+        <div class="my-events-basis" role="group" aria-label="日期口径与视角">
+          <button class="my-events-basis-btn active" type="button" data-my-events-basis="created" aria-pressed="true">下单时间</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-basis="settled" aria-pressed="false">结算时间</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-view="fixtures" aria-pressed="false">比赛视角</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-view="copy" aria-pressed="false" title="把 20 秒内同场、同盘口、同线、同比分的订单合并成一单">跟单视角</button>
+        </div>
+        <select id="myEventsTz" class="my-events-select my-events-tz" aria-label="时区">
+          <option value="-240" selected>代理后台 GMT-4</option>
+          <option value="480">北京时间 GMT+8</option>
+        </select>
+        <button id="myEventsAlignPartner" class="my-events-align-btn" type="button" title="结算时间 + GMT-4 + 昨日（对齐代理后台盈亏报表）">一键对齐后台</button>
+      </div>
+
+      <div id="myEventsBanner" class="my-events-banner hidden" role="status" aria-live="polite"></div>
+
+      <div id="myEventsOrdersWrap" class="my-events-table-wrap">
+        <table class="my-events-table">
+          <thead>
+            <tr>
+              <th>联赛</th>
+              <th>主队 vs 客队</th>
+              <th>盘口</th>
+              <th>水位</th>
+              <th>金额</th>
+              <th>输赢</th>
+              <th>订单号</th>
+              <th>代理</th>
+              <th>会员</th>
+              <th>结果</th>
+              <th id="myEventsTimeHeader">下单时间</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsBody"></tbody>
+        </table>
+        <div id="myEventsEmpty" class="my-events-empty hidden">暂无订单</div>
+      </div>
+      <button id="myEventsMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
+
+      <div id="myEventsFixtureWrap" class="my-events-table-wrap hidden">
+        <table class="my-events-table my-events-fixture-table">
+          <thead>
+            <tr>
+              <th>联赛</th>
+              <th>比赛</th>
+              <th>开赛</th>
+              <th class="num">单数</th>
+              <th class="num">会员</th>
+              <th class="num center" title="该场出现过的不同盘口数量：方向或线位不同各算 1 个">盘口</th>
+              <th class="num center">金额</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsFixtureBody"></tbody>
+        </table>
+        <div id="myEventsFixtureEmpty" class="my-events-empty hidden">
+          <div class="my-events-empty-hint">
+            <span id="myEventsFixtureEmptyText">当前范围内没有比赛</span>
+          </div>
+        </div>
+      </div>
+      <div id="myEventsCopyWrap" class="my-events-table-wrap hidden">
+        <table class="my-events-table my-events-copy-table">
+          <thead>
+            <tr>
+              <th>开始</th>
+              <th>联赛</th>
+              <th>比赛</th>
+              <th>盘口</th>
+              <th>比分</th>
+              <th>水位</th>
+              <th class="num">合并金额</th>
+              <th class="num center">单数</th>
+              <th class="num center">会员</th>
+              <th class="num center" title="合并组内首单到末单的秒数，最多 20 秒">耗时</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsCopyBody"></tbody>
+        </table>
+        <div id="myEventsCopyEmpty" class="my-events-empty hidden">
+          <div class="my-events-empty-hint">
+            <span>当前范围内没有可合并的订单</span>
+          </div>
+        </div>
+      </div>
+      <button id="myEventsCopyMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
+
+    </section>
+
+    <section id="copyPage" class="page-view shell-page" data-page-panel="copy" aria-label="PS38 跟单" hidden>
+      <div class="page-shell-body module-body">
+          <div class="module-grid">
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">01 / SIGNAL</span>
+                <span class="module-card-state">未接入</span>
+              </div>
+              <h2>跟单信号</h2>
+              <p>信号源、推送通道与派单规则来自 HD 主系统，独立版没有对应接口。</p>
+            </article>
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">02 / RISK</span>
+                <span class="module-card-state">未接入</span>
+              </div>
+              <h2>风险与限额</h2>
+              <p>下单前的限额、赔付与风控策略不在本版本内，避免误触真实投注。</p>
+            </article>
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">03 / RECEIPT</span>
+                <span class="module-card-state readonly">只读</span>
+              </div>
+              <h2>订单回执</h2>
+              <p>本地只有只读订单库；所有数据都来自后台报表，不产生写单动作。</p>
+            </article>
+          </div>
+        </div>
+    </section>
+
+    <section id="mergePage" class="page-view shell-page" data-page-panel="merge" aria-label="赛事合并" hidden>
+      <div class="page-shell-body merge-body">
+        <div class="merge-statusbar">
+          <div class="merge-sources">
+            <span class="merge-source" id="mergePs38Source">
+              <span class="status-dot"></span>
+              <span class="merge-source-label">PS38 / 平博</span>
+              <strong id="mergePs38Count">—</strong>
+            </span>
+            <span class="merge-source" id="mergeCrownSource">
+              <span class="status-dot"></span>
+              <span class="merge-source-label">皇冠赛事</span>
+              <strong id="mergeCrownCount">—</strong>
+            </span>
+            <span class="merge-source merge-source-plain" id="mergeMappedSource">
+              <span class="merge-source-label">已合并</span>
+              <strong id="mergeMappedCount">—</strong>
+            </span>
+            <span id="mergeUpdated" class="merge-updated">读取中…</span>
+          </div>
+          <div class="merge-source-actions">
+            <button id="mergeFetchCrown" class="merge-chip-btn" type="button">拉取皇冠赛事</button>
+            <button id="mergeFetchPs38" class="merge-chip-btn" type="button">拉取平博赛事</button>
+            <button id="mergeLeagueLibrary" class="merge-chip-btn" type="button">联赛库</button>
+            <button id="mergeMergedLeagues" class="merge-chip-btn" type="button">已合并联赛</button>
+          </div>
+        </div>
+
+        <div id="mergeNotice" class="merge-notice hidden" role="status"></div>
+
+        <div class="merge-layout">
+          <section class="merge-panel merge-leagues-panel" aria-labelledby="mergeLeaguesTitle">
+            <header class="merge-panel-head">
+              <h2 id="mergeLeaguesTitle">联赛绑定</h2>
+              <span id="mergeLeagueMeta" class="merge-panel-meta">—</span>
+            </header>
+            <p class="merge-panel-hint">仅显示尚未对应的皇冠联赛；命中已有绑定或完成绑定后，比赛进入右侧「赛事匹配」。</p>
+            <div id="mergeLeagues" class="merge-league-list"></div>
+          </section>
+
+          <section class="merge-panel merge-fixtures-panel" aria-labelledby="mergeFixturesTitle">
+            <header class="merge-panel-head merge-fixtures-head">
+              <div class="merge-fixtures-heading">
+                <h2 id="mergeFixturesTitle">赛事匹配</h2>
+                <span id="mergeFixtureMeta" class="merge-panel-meta">—</span>
+              </div>
+              <div class="merge-view-tabs" role="group" aria-label="赛事匹配视图">
+                <button class="merge-view-tab active" type="button" data-merge-view="pending" aria-pressed="true">待合并</button>
+                <button class="merge-view-tab" type="button" data-merge-view="merged" aria-pressed="false">已合并</button>
+              </div>
+            </header>
+            <p id="mergeFixtureHint" class="merge-panel-hint">显示已绑定联赛的皇冠比赛，在每场下方选择对应平博比赛；确认后进入「已合并」。</p>
+            <div id="mergeFixtures" class="merge-fixture-list"></div>
+          </section>
+        </div>
+
+      </div>
+    </section>
+
+    <section id="poolPage" class="page-view shell-page account-pool-page" data-page-panel="pool" aria-label="号池管理" hidden>
+      <div class="page-shell-body">
+        <div class="panel pool-surface">
+          <div class="pool-kpis" aria-label="号池概览">
+            <div class="pool-kpi"><span>账号</span><strong id="poolTotal">0</strong></div>
+            <div class="pool-kpi"><span>在线</span><strong id="poolOnline" class="pool-kpi-online">0</strong></div>
+            <div class="pool-kpi"><span>待登录</span><strong id="poolPending">0</strong></div>
+            <div class="pool-kpi"><span>异常</span><strong id="poolError" class="pool-kpi-error">0</strong></div>
+          </div>
+
+          <div class="pool-toolbar">
+            <label class="pool-search" for="poolSearch">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4 4"></path></svg>
+              <input id="poolSearch" type="search" placeholder="搜索账号、域名" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="pool-filters" role="group" aria-label="账号状态筛选">
+              <button class="pool-filter active" type="button" data-pool-filter="all">全部</button>
+              <button class="pool-filter" type="button" data-pool-filter="online">在线</button>
+              <button class="pool-filter" type="button" data-pool-filter="pending">待登录</button>
+              <button class="pool-filter" type="button" data-pool-filter="error">异常</button>
+            </div>
+            <label class="pool-sort" for="poolSort">
+              排序
+              <select id="poolSort">
+                <option value="default">默认（主账号优先）</option>
+                <option value="status">状态优先</option>
+                <option value="checked">最近检测</option>
+                <option value="name">账号名称</option>
+                <option value="platform">账号类型</option>
+              </select>
+            </label>
+            <span id="poolFilterCount" class="pool-filter-count">—</span>
+          </div>
+
+          <div class="pool-card-area">
+            <div id="poolCards" class="pool-card-grid" aria-label="账号列表"></div>
+
+            <div id="poolEmpty" class="pool-empty" hidden>
+              <span class="pool-empty-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3.5" y="5" width="17" height="14" rx="3"></rect>
+                  <path d="M3.5 9.5h17"></path>
+                  <path d="M7.5 14.5h4"></path>
+                  <circle cx="16.5" cy="14.5" r="1"></circle>
+                </svg>
+              </span>
+              <h2 id="poolEmptyTitle">还没有账号</h2>
+              <p id="poolEmptyText">新增账号后，这里会显示登录、会话与心跳状态。</p>
+              <button id="poolEmptyAdd" class="button primary" type="button">新增账号</button>
+            </div>
+          </div>
+
+          <details id="poolLogs" class="pool-logs">
+            <summary>运行日志<span id="poolLogCount"></span></summary>
+            <div id="poolLogList" class="pool-log-list"></div>
+          </details>
+
+          <footer class="page-shell-foot">
+            <span>号池 data/accounts.sqlite3</span>
+            <span>心跳 <b id="poolInterval">60</b>s</span>
+          </footer>
+        </div>
+      </div>
+    </section>
+
+    <section id="settingsPage" class="page-view shell-page" data-page-panel="settings" aria-label="设置" hidden>
+      <div class="page-shell-body module-body">
+          <div class="module-grid">
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">CONFIG</span>
+              </div>
+              <h2>配置文件</h2>
+              <p class="module-value">config.json</p>
+              <p>端口、数据库、采集账号、采集节奏与历史起点都在这里修改。</p>
+            </article>
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">STORE</span>
+              </div>
+              <h2>订单库</h2>
+              <p class="module-value">data/orders.sqlite3</p>
+              <p>页面只读查询；导入旧库与补采历史通过命令行完成。</p>
+            </article>
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">CADENCE</span>
+              </div>
+              <h2>采集节奏</h2>
+              <p class="module-value">1s / 300s</p>
+              <p>未结算约 1 秒一轮，已结算约 5 分钟一轮，均为 config.json 默认值。</p>
+            </article>
+            <article class="module-card">
+              <div class="module-card-top">
+                <span class="module-card-index">SESSION</span>
+              </div>
+              <h2>浏览器会话</h2>
+              <p class="module-value">data/profile</p>
+              <p>登录 Cookie 保存在本地；退出登录使用本页的「重新登录」。</p>
+            </article>
+          </div>
+        </div>
+    </section>
+
+  </div>
+
+  <dialog id="mergeDialog" class="merge-dialog" aria-labelledby="mergeDialogTitle">
+    <header class="merge-dialog-head">
+      <div class="merge-dialog-heading">
+        <span id="mergeDialogKicker" class="merge-dialog-kicker">LEAGUE LIBRARY</span>
+        <h2 id="mergeDialogTitle">联赛库</h2>
+      </div>
+      <button id="mergeDialogClose" class="merge-dialog-close" type="button" aria-label="关闭">×</button>
+    </header>
+    <div id="mergeDialogBody" class="merge-dialog-body"></div>
+  </dialog>
+
+  <dialog id="poolDialog" class="pool-dialog" aria-labelledby="poolDialogTitle">
+    <form id="poolForm" novalidate>
+      <header class="pool-dialog-head">
+        <h2 id="poolDialogTitle">新增账号</h2>
+        <button class="pool-dialog-close" type="button" data-pool-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="pool-form-grid">
+        <label class="pool-field">
+          <span>账号类型</span>
+          <select id="poolPlatform" name="platform">
+            <option value="ps38_backend">PS38 后台</option>
+            <option value="crown_backend">皇冠后台</option>
+            <option value="crown_member">皇冠会员</option>
+          </select>
+        </label>
+        <label class="pool-field">
+          <span>账号名称</span>
+          <input id="poolName" name="name" maxlength="128" placeholder="例如 皇冠会员 A" autocomplete="off">
+        </label>
+        <label class="pool-field pool-field-wide">
+          <span>站点地址 <em>必填</em></span>
+          <input id="poolBaseUrl" name="base_url" required placeholder="https://example.com" autocomplete="url">
+        </label>
+        <label class="pool-field">
+          <span>登录路径</span>
+          <input id="poolLoginPath" name="login_path" value="/" autocomplete="off">
+        </label>
+        <label class="pool-field">
+          <span>看板路径 <em>可选</em></span>
+          <input id="poolDashboardPath" name="dashboard_path" placeholder="/" autocomplete="off">
+        </label>
+        <label class="pool-field">
+          <span>登录账号 <em>必填</em></span>
+          <input id="poolUsername" name="username" required maxlength="128" autocomplete="username">
+        </label>
+        <label class="pool-field">
+          <span>密码 <em>可选</em></span>
+          <input id="poolPassword" name="password" type="password" autocomplete="current-password" placeholder="留空则手动登录">
+        </label>
+        <label class="pool-field">
+          <span>检测间隔（秒）</span>
+          <input id="poolIntervalInput" name="check_interval" type="number" min="15" max="3600" value="60">
+        </label>
+      </div>
+      <p id="poolFormHint" class="pool-form-hint"></p>
+      <p id="poolFormError" class="pool-form-error" role="alert"></p>
+      <footer class="pool-dialog-actions">
+        <button class="button ghost" type="button" data-pool-dialog-close>取消</button>
+        <button class="button primary" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="static/app.js?v=20261103-24"></script>
+</body>
+</html>

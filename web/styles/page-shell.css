@@ -1,0 +1,186 @@
+/* ── shared page shell ─────────────────────────────────────────────────────
+   One compact chrome for every page: a single title bar with the active
+   page's actions, then the page content. The shell is structural, not a
+   card, so each page keeps the same card language as the dashboard. */
+
+.shell-page {
+  min-height: calc(100vh - 245px);
+  padding-top: 2px;
+}
+
+.app-page-bar {
+  margin-bottom: 12px;
+}
+
+.app-page-bar .page-shell-title:focus {
+  outline: none;
+}
+
+.page-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.page-action-group[hidden] {
+  display: none;
+}
+
+.page-shell {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.page-shell-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding: 2px 1px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.page-shell-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.page-shell-title {
+  font-size: 1.02rem;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.page-shell-meta {
+  padding: 2px 7px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.page-shell-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.page-shell-actions .button {
+  min-height: 31px;
+  padding: 0 11px;
+  font-size: 0.71rem;
+  font-weight: 600;
+}
+
+.page-shell-actions .button:disabled {
+  color: var(--muted);
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.page-shell-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.page-shell-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+  padding: 8px 16px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.01em;
+}
+
+.page-shell-empty {
+  display: flex;
+  min-height: 360px;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 20px;
+  text-align: center;
+  background: radial-gradient(58% 100% at 50% 0%, rgba(66, 230, 164, 0.04), transparent 72%);
+}
+
+.page-shell-empty-icon {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  place-items: center;
+  color: var(--accent);
+  border: 1px solid rgba(66, 230, 164, 0.24);
+  border-radius: 14px;
+  background: var(--accent-soft);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.page-shell-empty h2 {
+  font-size: 0.92rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* Page content uses the full width of the shell instead of the narrow
+   documentation column the old module pages used. */
+.module-body .module-grid {
+  max-width: none;
+}
+
+@media (max-width: 560px) {
+  .shell-page {
+    min-height: calc(100vh - 300px);
+  }
+
+  .page-shell-bar {
+    padding: 2px 0 10px;
+  }
+
+  .page-shell-heading,
+  .page-shell-actions,
+  .page-action-group {
+    width: 100%;
+  }
+
+  .page-shell-actions .button {
+    flex: 1 1 calc(50% - 4px);
+  }
+
+  .page-action-group[data-page-actions="home"] .button {
+    flex: 0 1 auto;
+    min-width: 92px;
+  }
+
+  .page-shell-foot {
+    padding: 8px 12px;
+    font-size: 0.6rem;
+  }
+
+  .page-shell-empty {
+    min-height: 300px;
+  }
+}
