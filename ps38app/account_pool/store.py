@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,18 @@ def _bool(value: Any, default: bool = True) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _balance_text(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    try:
+        amount = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite() or amount < 0:
+        return None
+    return format(amount, "f")
 
 
 def _normalize_url(value: Any) -> str:
@@ -243,9 +256,17 @@ class AccountStore:
         return self._read_json(self.paths(account_id)["meta"])
 
     def save_meta(self, account_id: str, meta: Dict[str, Any]) -> None:
+        currency = _text(meta.get("balance_currency"), 3).upper()
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            currency = ""
         safe = {key: _text(meta.get(key), 2048) for key in (
             "uid", "ver", "langx", "origin", "saved_at", "user_agent", "login_layer",
         )}
+        safe.update({
+            "balance": _balance_text(meta.get("balance")),
+            "balance_currency": currency,
+            "balance_checked_at": _text(meta.get("balance_checked_at"), 64),
+        })
         self._write_private(self.paths(account_id)["meta"], safe)
 
     def credentials(self, account_id: str) -> Dict[str, str]:
@@ -268,6 +289,9 @@ class AccountStore:
         account_id = row["id"]
         paths = self.paths(account_id)
         meta = self.load_meta(account_id)
+        currency = _text(meta.get("balance_currency"), 3).upper()
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            currency = ""
         return {
             "id": account_id,
             "platform": row["platform"],
@@ -290,6 +314,9 @@ class AccountStore:
             "has_session": paths["storage"].is_file(),
             "has_credentials": paths["credentials"].is_file(),
             "has_member_meta": bool(meta.get("uid") and meta.get("ver")),
+            "balance": _balance_text(meta.get("balance")),
+            "balance_currency": currency,
+            "balance_checked_at": _text(meta.get("balance_checked_at"), 64),
             "heartbeats": self.heartbeats(account_id, 24),
         }
 

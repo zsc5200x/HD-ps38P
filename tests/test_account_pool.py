@@ -4,11 +4,12 @@ import stat
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
 from ps38app.account_pool.crown_member import cookie_header, ping_member
-from ps38app.account_pool.providers import CheckResult, LoginResult
+from ps38app.account_pool.providers import CheckResult, CrownProvider, LoginResult
 from ps38app.account_pool.service import AccountPoolService
 from ps38app.account_pool.store import AccountStore, PRIMARY_ID
 
@@ -95,6 +96,33 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.delete_account(PRIMARY_ID)
 
+    def test_public_balance_snapshot_is_validated_and_session_meta_stays_private(self):
+        account = self.store.save_account({
+            "platform": "crown_member",
+            "name": "会员 A",
+            "base_url": "https://member.example.com",
+            "login_path": "/",
+            "username": "u1",
+        })
+        self.store.save_meta(account["id"], {
+            "uid": "private-uid", "ver": "private-ver", "balance": "2,500.25",
+            "balance_currency": "CNY", "balance_checked_at": "2026-11-04T10:00:00+08:00",
+            "password": "must-not-leak",
+        })
+        public = self.store.get(account["id"])
+        self.assertEqual(public["balance"], "2500.25")
+        self.assertEqual(public["balance_currency"], "CNY")
+        self.assertEqual(public["balance_checked_at"], "2026-11-04T10:00:00+08:00")
+        encoded = json.dumps(public, ensure_ascii=False).lower()
+        self.assertNotIn("private-uid", encoded)
+        self.assertNotIn("private-ver", encoded)
+        self.assertNotIn("must-not-leak", encoded)
+
+        self.store.save_meta(account["id"], {"balance": "NaN", "balance_currency": "???"})
+        unknown = self.store.get(account["id"])
+        self.assertIsNone(unknown["balance"])
+        self.assertEqual(unknown["balance_currency"], "")
+
 
 class CrownMemberHeartbeatTests(unittest.TestCase):
     def test_online_response(self):
@@ -108,6 +136,58 @@ class CrownMemberHeartbeatTests(unittest.TestCase):
             transport=lambda url, form, headers, timeout: (200, xml),
         )
         self.assertEqual(result["status"], "online")
+        self.assertEqual(result["balance"], "1000")
+        self.assertEqual(result["balance_currency"], "CNY")
+        self.assertTrue(result["balance_checked_at"])
+
+    def test_balance_uses_hdproc_field_priority_and_reports_unknown_values(self):
+        storage = {"cookies": [{"name": "sid", "value": "abc",
+                                 "domain": "member.example.com", "path": "/", "expires": -1}]}
+        meta = {"uid": "u1", "ver": "v1", "origin": "https://member.example.com"}
+
+        def ping(fields):
+            xml = "<serverresponse><enable>1</enable><currency>RMB</currency>" + fields + "</serverresponse>"
+            return ping_member(
+                "https://member.example.com", storage, meta,
+                transport=lambda url, form, headers, timeout: (200, xml.encode()),
+            )
+
+        self.assertEqual(ping("<maxcredit>1,200.50</maxcredit><nowcredit>900</nowcredit><cash>800</cash>")
+                         ["balance"], "1200.50")
+        self.assertEqual(ping("<nowcredit>900</nowcredit><cash>800</cash>")["balance"], "900")
+        self.assertEqual(ping("<cash>800</cash>")["balance"], "800")
+        for raw in ("NaN", "Infinity", "-1", "not-a-number"):
+            with self.subTest(raw=raw):
+                result = ping(f"<maxcredit>{raw}</maxcredit><nowcredit>900</nowcredit>")
+                self.assertIsNone(result["balance"])
+                self.assertEqual(result["balance_currency"], "CNY")
+
+    def test_crown_provider_check_returns_fresh_balance_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = pool_config(root)
+            store = AccountStore(config["pool_db_path"], config)
+            account = store.save_account({
+                "platform": "crown_member",
+                "name": "测试会员",
+                "base_url": "https://member.example.com",
+                "login_path": "/",
+                "username": "u1",
+            })
+            store.save_meta(account["id"], {"uid": "u1", "ver": "v1"})
+            storage = store.paths(account["id"])["storage"]
+            storage.parent.mkdir(parents=True, exist_ok=True)
+            storage.write_text("{}", encoding="utf-8")
+            provider = CrownProvider(config, store, "crown_member")
+            with mock.patch.object(provider, "_member_ping", return_value={
+                "status": "online", "message": "ok", "balance": "750",
+                "balance_currency": "CNY", "balance_checked_at": "2026-11-04T10:01:00+08:00",
+            }):
+                result = provider.check(account)
+            self.assertEqual(result.status, "online")
+            self.assertEqual(result.meta["balance"], "750")
+            self.assertEqual(result.meta["balance_currency"], "CNY")
+            self.assertEqual(result.meta["balance_checked_at"], "2026-11-04T10:01:00+08:00")
 
     def test_double_login_is_conflict(self):
         xml = b"<serverresponse><code>error</code><msg>doublelogin</msg></serverresponse>"
@@ -171,6 +251,113 @@ class ServiceTests(unittest.TestCase):
                 return account
             time.sleep(0.02)
         return self.service.store.get(account_id)
+
+    def _save_member_session(self, **snapshot):
+        paths = self.service.store.paths(self.account["id"])
+        meta = {
+            "uid": "private-uid",
+            "ver": "private-ver",
+            "langx": "zh-cn",
+            "origin": "https://member.example.com",
+            **snapshot,
+        }
+        self.service.store._write_private(paths["meta"], meta)
+        self.service.store._write_private(
+            paths["storage"],
+            {
+                "cookies": [
+                    {
+                        "name": "sid",
+                        "value": "private-cookie",
+                        "domain": "member.example.com",
+                        "path": "/",
+                        "expires": -1,
+                    }
+                ],
+                "origins": [],
+            },
+        )
+
+    def test_member_heartbeat_populates_old_session_public_balance_snapshot(self):
+        self._save_member_session()
+        self.assertNotIn("balance", self.service.store.load_meta(self.account["id"]))
+        xml = (
+            b"<serverresponse><enable>Y</enable><currency>RMB</currency>"
+            b"<maxcredit>2,500.25</maxcredit></serverresponse>"
+        )
+        with mock.patch(
+            "ps38app.account_pool.crown_member._http_post",
+            return_value=(200, xml),
+        ) as transport:
+            self.service._check_account(self.account["id"], False)
+        transport.assert_called_once()
+        self.assertIn(b"p=get_member_data", transport.call_args.args[1])
+        self.assertEqual(transport.call_args.args[2]["cookie"], "sid=private-cookie")
+
+        snapshot = self.service.snapshot()
+        account = next(item for item in snapshot["accounts"] if item["id"] == self.account["id"])
+        self.assertEqual(account["status"], "online")
+        self.assertEqual(account["balance"], "2500.25")
+        self.assertEqual(account["balance_currency"], "CNY")
+        self.assertIsNotNone(datetime.fromisoformat(account["balance_checked_at"]).tzinfo)
+        encoded = json.dumps(snapshot, ensure_ascii=False).lower()
+        for private in ("private-uid", "private-ver", "private-cookie"):
+            self.assertNotIn(private, encoded)
+        for key in ("uid", "ver", "cookie", "cookies", "storage_state"):
+            self.assertNotIn(f'"{key}"', encoded)
+
+    def test_member_heartbeat_network_failure_preserves_balance_snapshot(self):
+        previous = {
+            "balance": "2500.25",
+            "balance_currency": "CNY",
+            "balance_checked_at": "2026-11-04T10:00:00+08:00",
+        }
+        self._save_member_session(**previous)
+        self.service.store.set_status(self.account["id"], "online", "测试会话")
+        with mock.patch(
+            "ps38app.account_pool.crown_member._http_post",
+            side_effect=TimeoutError(),
+        ) as transport:
+            self.service._check_account(self.account["id"], False)
+        transport.assert_called_once()
+
+        snapshot = self.service.snapshot()
+        account = next(item for item in snapshot["accounts"] if item["id"] == self.account["id"])
+        self.assertEqual(account["status"], "error")
+        self.assertTrue(account["has_session"])
+        self.assertTrue(account["last_check"])
+        self.assertEqual({key: account[key] for key in previous}, previous)
+
+    def test_member_partial_check_preserves_snapshot_and_explicit_unknown_clears_balance(self):
+        previous = {
+            "balance": "2500.25",
+            "balance_currency": "CNY",
+            "balance_checked_at": "2026-11-04T10:00:00+08:00",
+        }
+        self._save_member_session(**previous)
+        with mock.patch.object(CrownProvider, "_member_ping", return_value={"status": "online"}):
+            self.service._check_account(self.account["id"], False)
+        account = self.service.store.get(self.account["id"])
+        self.assertEqual(account["status"], "online")
+        self.assertEqual({key: account[key] for key in previous}, previous)
+
+        unknown = {
+            "balance": None,
+            "balance_currency": "",
+            "balance_checked_at": "2026-11-04T10:01:00+08:00",
+        }
+        with mock.patch.object(
+            CrownProvider,
+            "_member_ping",
+            return_value={
+                "status": "online",
+                **unknown,
+            },
+        ):
+            self.service._check_account(self.account["id"], False)
+        account = self.service.store.get(self.account["id"])
+        self.assertEqual(account["status"], "online")
+        self.assertEqual({key: account[key] for key in unknown}, unknown)
 
     def test_login_and_check_workers(self):
         fake = FakeProvider()

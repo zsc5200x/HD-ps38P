@@ -53,6 +53,12 @@ function formatLatency(value) {
   return `${(number / 1000).toFixed(2)}s`;
 }
 
+function formatBalance(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return "未知";
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(amount);
+}
+
 function statusOf(account) {
   return STATUS[account.status] || { label: account.status || "未知", tone: "idle" };
 }
@@ -220,6 +226,16 @@ function cardFor(account) {
   metrics.append(metric("最近检测", account.last_check
     ? formatClock(account.last_check)
     : (latest ? formatClock(latest.created_at) : "—")));
+  if (account.platform === "crown_member") {
+    const hasBalance = account.balance !== null && account.balance !== undefined && account.balance !== "";
+    const currency = account.balance_currency || "";
+    metrics.append(metric("会员余额", hasBalance
+      ? `${formatBalance(account.balance)}${currency ? ` ${currency}` : ""}`
+      : "未知", hasBalance ? "is-accent" : "is-muted"));
+    metrics.append(metric("余额快照", account.balance_checked_at
+      ? formatClock(account.balance_checked_at)
+      : "尚无记录", "is-muted"));
+  }
   card.append(metrics);
 
   card.append(heartbeatBlock(account));

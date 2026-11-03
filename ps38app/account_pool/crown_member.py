@@ -9,6 +9,8 @@ from __future__ import annotations
 import ssl
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlencode
@@ -76,8 +78,32 @@ def _parse_member_body(body: bytes) -> Dict[str, Any]:
         if message.lower() == "doublelogin":
             return {"status": "conflict", "message": "皇冠提示重复登录，请确认该会员是否在其他地方登录"}
         return {"status": "expired", "message": "皇冠会员会话已失效，请重新登录"}
-    if any(values.get(key) for key in ("enable", "currency", "maxcredit")):
-        return {"status": "online", "message": "皇冠会员在线检查通过"}
+    if any(values.get(key) for key in ("enable", "currency", "maxcredit", "nowcredit", "cash")):
+        balance = None
+        for key in ("maxcredit", "nowcredit", "cash"):
+            raw = values.get(key, "").replace(",", "").strip()
+            if not raw:
+                continue
+            try:
+                amount = Decimal(raw)
+            except InvalidOperation:
+                break
+            if not amount.is_finite() or amount < 0:
+                break
+            balance = format(amount, "f")
+            break
+        currency = values.get("currency", "").strip().upper()
+        if currency == "RMB":
+            currency = "CNY"
+        if currency and not (len(currency) == 3 and currency.isascii() and currency.isalpha()):
+            currency = ""
+        return {
+            "status": "online",
+            "message": "皇冠会员在线检查通过",
+            "balance": balance,
+            "balance_currency": currency,
+            "balance_checked_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        }
     return {"status": "unavailable", "message": "会员在线检查未返回可识别的登录信息"}
 
 

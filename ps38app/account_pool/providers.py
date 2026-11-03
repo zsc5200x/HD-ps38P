@@ -433,6 +433,14 @@ class CrownProvider(BaseProvider):
             transport=transport,
         )
 
+    @staticmethod
+    def _member_snapshot(meta, result):
+        snapshot = dict(meta or {})
+        for key in ("balance", "balance_currency", "balance_checked_at"):
+            if key in result:
+                snapshot[key] = result[key]
+        return snapshot
+
     def _restore_member(self, context, storage) -> None:
         # Persistent Chromium does not always retain session cookies on exit.
         # Restore the verified snapshot before navigating, including localStorage.
@@ -497,7 +505,9 @@ class CrownProvider(BaseProvider):
                 on_status("正在验证并恢复已保存的会员会话…")
             result = self._member_ping(account, saved, saved_meta)
             if result["status"] == "online":
-                return LoginResult("online", "已恢复保存的会员会话，在线检查通过", saved_meta)
+                snapshot = self._member_snapshot(saved_meta, result)
+                self.store.save_meta(account["id"], snapshot)
+                return LoginResult("online", "已恢复保存的会员会话，在线检查通过", snapshot)
         if self._stop(should_stop):
             raise ProviderError("登录已取消")
         if force:
@@ -568,6 +578,7 @@ class CrownProvider(BaseProvider):
                         if self._stop(should_stop):
                             raise ProviderError("登录已取消")
                         meta["saved_at"] = str(int(time.time()))
+                        meta = self._member_snapshot(meta, result)
                         self._save_session(account, context, meta, storage_path=paths["storage"])
                         return LoginResult("online", "会员登录成功，会话已稳定保存且在线检查通过", meta)
                     if on_status:
@@ -588,7 +599,8 @@ class CrownProvider(BaseProvider):
             status = result.get("status", "unavailable")
             message = str(result.get("message") or "")
             if status == "online":
-                return CheckResult("online", message or "会员在线检查通过", meta)
+                return CheckResult("online", message or "会员在线检查通过",
+                                   self._member_snapshot(meta, result))
             if status == "expired":
                 return CheckResult("expired", message or "会员会话已失效", meta)
             if status == "conflict":

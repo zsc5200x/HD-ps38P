@@ -77,6 +77,7 @@ class WebBrowserTests(unittest.TestCase):
         self.blocked_requests = []
         self.unexpected_api_requests = []
         self.fail_save = False
+        self.pool_response = None
         self.merge_response_sequence = None
         self.merge_request_count = 0
         self.context = self.browser.new_context(service_workers="block", locale="zh-CN")
@@ -102,6 +103,9 @@ class WebBrowserTests(unittest.TestCase):
             return
         if parsed.path == "/api/pool/save" and self.fail_save:
             route.fulfill(status=503, json={"ok": False, "error": "模拟保存失败，请稍后重试"})
+            return
+        if parsed.path == "/api/pool" and self.pool_response is not None:
+            route.fulfill(json=self.pool_response)
             return
         if parsed.path == "/api/merge":
             self.merge_request_count += 1
@@ -201,6 +205,47 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator('[data-pool-filter="all"]')).to_have_attribute(
             "aria-pressed", "true"
         )
+
+    def test_member_balances_show_zero_unknown_and_refresh_from_snapshot(self):
+        common = {
+            "platform": "crown_member",
+            "platform_label": "皇冠会员",
+            "status": "online",
+            "has_session": True,
+            "enabled": True,
+            "balance_currency": "CNY",
+            "balance_checked_at": "2026-11-04T03:40:00+08:00",
+        }
+        self.pool_response = {
+            "ok": True,
+            "accounts": [
+                {**common, "id": "funded", "name": "余额测试", "balance": "2500.25"},
+                {**common, "id": "zero", "name": "零余额测试", "balance": "0"},
+                {
+                    **common, "id": "unknown", "name": "未知余额测试",
+                    "balance": None, "balance_checked_at": "",
+                },
+            ],
+            "summary": {"total": 3, "online": 3, "pending": 0, "error": 0},
+            "logs": [],
+            "check_interval": 60,
+        }
+        self.page.goto(f"{self.origin}/#/pool")
+        funded = self.page.locator('#poolCards .pool-card[data-pool-id="funded"]')
+        zero = self.page.locator('#poolCards .pool-card[data-pool-id="zero"]')
+        unknown = self.page.locator('#poolCards .pool-card[data-pool-id="unknown"]')
+        self.expect(funded).to_contain_text("2,500.25 CNY")
+        self.expect(funded).not_to_contain_text("尚无记录")
+        self.expect(zero).to_contain_text("0 CNY")
+        self.expect(zero).not_to_contain_text("未知")
+        self.expect(unknown).to_contain_text("未知")
+        self.expect(unknown).to_contain_text("尚无记录")
+
+        self.pool_response["accounts"][2].update(
+            balance="350.50", balance_checked_at="2026-11-04T03:41:00+08:00"
+        )
+        self.expect(unknown).to_contain_text("350.5 CNY", timeout=8000)
+        self.expect(unknown).not_to_contain_text("尚无记录")
 
     def test_merge_cold_saved_mappings_are_visible_before_ready_data(self):
         mapping = {
