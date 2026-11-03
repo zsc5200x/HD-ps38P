@@ -3,10 +3,16 @@ import { $, el, showToast } from "../dom.js";
 import { fetchJson } from "../http.js";
 
 const MAX_CANDIDATES = 3;
+const MERGE_COLD_POLL_INTERVAL_MS = 500;
+const MERGE_REFRESH_POLL_INTERVAL_MS = 1500;
+const MERGE_RETRY_INTERVAL_MS = 2500;
 
 let data = null;
 let loading = false;
 let busy = false;
+let mergePageActive = false;
+let mergePollTimer = null;
+let mergeBuildPending = false;
 let confirmingFixtureId = null;
 let dialogMode = null;
 let matchView = "pending";
@@ -94,7 +100,7 @@ function updateControls() {
   const auto = $("mergeAuto");
   const refresh = $("mergeRefresh");
   if (auto) {
-    auto.disabled = Boolean(loading || busy || !data || data.crownError || !data.sources?.ps38?.ok || !data.sources?.crown?.count);
+    auto.disabled = Boolean(loading || busy || mergeBuildPending || !data || data.crownError || !data.sources?.ps38?.ok || !data.sources?.crown?.count);
   }
   if (refresh) refresh.disabled = Boolean(loading || busy);
   for (const id of ["mergeFetchCrown", "mergeFetchPs38"]) {
@@ -132,13 +138,26 @@ async function loadMerge({ silent = false } = {}) {
     if (!response.ok || payload.ok === false) {
       throw new Error(payload.error || `HTTP ${response.status}`);
     }
+    if (payload.ready === false) {
+      mergeBuildPending = payload.refreshing === true;
+      if (!data) {
+        renderLoading(payload.error || "正在准备赛事匹配数据…");
+      }
+      if (payload.error) showNotice(payload.error);
+      else renderStatus();
+      scheduleMergePoll(payload);
+      return payload;
+    }
     data = payload;
+    mergeBuildPending = payload.refreshing === true;
     renderAll();
+    scheduleMergePoll(payload);
     return payload;
   } catch (error) {
     const message = String(error?.message || error);
     showNotice(`合并数据读取失败：${message}`);
     if (!silent) showToast(`合并数据读取失败：${message}`);
+    if (mergePageActive) scheduleMergePoll({ ready: false, refreshing: false });
     return null;
   } finally {
     loading = false;
@@ -146,11 +165,39 @@ async function loadMerge({ silent = false } = {}) {
   }
 }
 
-function renderLoading() {
+function scheduleMergePoll(payload) {
+  if (mergePollTimer !== null) {
+    window.clearTimeout(mergePollTimer);
+    mergePollTimer = null;
+  }
+  const pending = payload?.ready === false || payload?.refreshing === true;
+  if (!mergePageActive || !pending) return;
+  const delay = payload?.ready === true
+    ? MERGE_REFRESH_POLL_INTERVAL_MS
+    : payload?.refreshing === false
+      ? MERGE_RETRY_INTERVAL_MS
+      : MERGE_COLD_POLL_INTERVAL_MS;
+  mergePollTimer = window.setTimeout(() => {
+    mergePollTimer = null;
+    loadMerge({ silent: true });
+  }, delay);
+}
+
+function setMergePageActive(active) {
+  mergePageActive = Boolean(active);
+  if (!mergePageActive && mergePollTimer !== null) {
+    window.clearTimeout(mergePollTimer);
+    mergePollTimer = null;
+  } else if (mergePageActive) {
+    loadMerge({ silent: true });
+  }
+}
+
+function renderLoading(message = "正在读取皇冠与平博赛事…") {
   const fixtures = $("mergeFixtures");
-  if (fixtures) fixtures.replaceChildren(node("div", "merge-empty", "正在读取皇冠与平博赛事…"));
+  if (fixtures) fixtures.replaceChildren(node("div", "merge-empty", message));
   const leagues = $("mergeLeagues");
-  if (leagues) leagues.replaceChildren(node("div", "merge-empty", "正在读取联赛…"));
+  if (leagues) leagues.replaceChildren(node("div", "merge-empty", message));
 }
 
 function renderStatus() {
@@ -166,7 +213,9 @@ function renderStatus() {
   }
   const updated = $("mergeUpdated");
   if (updated) {
-    updated.textContent = data
+    updated.textContent = mergeBuildPending
+      ? "后台正在准备赛事数据…"
+      : data
       ? `更新 ${String(data.generatedAt || "").slice(11, 19)}`
       : "读取中…";
   }
@@ -1125,10 +1174,13 @@ export function bindMergeEvents() {
   });
 
   window.addEventListener("ps38:pagenav", (event) => {
-    if (event.detail?.page === "merge") loadMerge({ silent: true });
-    else closeDialog();
+    if (event.detail?.page === "merge") setMergePageActive(true);
+    else {
+      setMergePageActive(false);
+      closeDialog();
+    }
   });
 
   const initial = String(window.location.hash || "").replace(/^#\/?/, "");
-  if (initial === "merge") loadMerge();
+  if (initial === "merge") setMergePageActive(true);
 }

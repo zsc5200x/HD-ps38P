@@ -1261,6 +1261,92 @@ class MergeService:
         self._pinnacle_lock = threading.Lock()
         self._pinnacle_cache: Optional[Tuple[float, List[Dict[str, Any]], Optional[str], str]] = None
         self._mapping_lock = threading.RLock()
+        self._payload_lock = threading.Lock()
+        self._payload_cache: Optional[Dict[str, Any]] = None
+        self._payload_cached_at = 0.0
+        self._payload_building = False
+        self._payload_generation = 0
+        self._payload_error = ""
+        self._closed = False
+        self._payload_ttl_seconds = 3.0
+
+    def _loading_payload(self) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "ready": False,
+            "refreshing": True,
+            "generatedAt": datetime.now(DISPLAY_TZ).isoformat(timespec="seconds"),
+            "window": {
+                "scope": "provider_live_today",
+                "calendarBasis": "provider",
+                "pastHours": float(self.config.get("merge_past_hours") or 24.0),
+                "horizonHours": float(self.config.get("merge_horizon_hours") or 72.0),
+            },
+            "sources": {
+                "ps38": {"ok": False, "count": 0, "leagueCount": 0,
+                         "mode": "current_catalog", "warning": None, "fetchedAt": ""},
+                "crown": {"ok": False, "count": 0, "leagueCount": 0,
+                          "error": None, "fetchedAt": ""},
+            },
+            "counts": {"leagueMappings": 0, "fixtureMappings": 0},
+            "ps38Events": [], "matchingPerspective": "crown", "matchEvents": [],
+            "matchCrownEvents": [], "crownEvents": [], "ps38Leagues": [],
+            "crownLeagues": [], "leagueMappings": [], "mappings": [],
+            "leagueSuggestions": [], "suggestions": [], "crownError": None,
+        }
+
+    def request_payload(self) -> Dict[str, Any]:
+        """Return a recent snapshot immediately and build cold/stale data once."""
+        with self._payload_lock:
+            now = time.monotonic()
+            cached = self._payload_cache
+            stale = cached is None or now - self._payload_cached_at >= self._payload_ttl_seconds
+            if stale and not self._closed and not self._payload_building:
+                self._payload_building = True
+                self._payload_error = ""
+                generation = self._payload_generation
+                threading.Thread(
+                    target=self._build_payload,
+                    args=(generation,),
+                    name="merge-payload-refresh",
+                    daemon=True,
+                ).start()
+            if cached is None:
+                payload = self._loading_payload()
+                if self._payload_error:
+                    payload.update({"refreshing": False, "error": self._payload_error})
+                return payload
+            return {**cached, "ready": True, "refreshing": self._payload_building}
+
+    def _build_payload(self, generation: int) -> None:
+        payload = None
+        error = ""
+        try:
+            payload = self.payload()
+        except Exception as exc:  # noqa: BLE001 - keep cold reads off the HTTP worker
+            error = f"合并数据读取失败：{exc}"
+        with self._payload_lock:
+            self._payload_building = False
+            if generation != self._payload_generation or self._closed:
+                return
+            if payload is None:
+                self._payload_error = error
+            else:
+                self._payload_cache = payload
+                self._payload_cached_at = time.monotonic()
+                self._payload_error = ""
+
+    def invalidate_payload(self) -> None:
+        with self._payload_lock:
+            self._payload_generation += 1
+            self._payload_cache = None
+            self._payload_cached_at = 0.0
+            self._payload_error = ""
+
+    def close(self) -> None:
+        with self._payload_lock:
+            self._closed = True
+            self._payload_generation += 1
 
     def _crown_source(self) -> Tuple[List[Dict[str, Any]], Optional[str], str]:
         """Reuse a successful pull through matching and the following UI read.
@@ -1294,6 +1380,7 @@ class MergeService:
         events, error, fetched = fetch_crown_events(self.config)
         with self._crown_lock:
             self._crown_cache = (time.monotonic(), events, error, fetched)
+        self.invalidate_payload()
         if error and not events:
             raise CrownUnavailable(error)
         matched = self._auto_after_refresh()
@@ -1313,6 +1400,7 @@ class MergeService:
         events, error, fetched = fetch_pinnacle_events(self.config)
         with self._pinnacle_lock:
             self._pinnacle_cache = (time.monotonic(), events, error, fetched)
+        self.invalidate_payload()
         if error and not events:
             raise ValueError(error)
         matched = self._auto_after_refresh()
@@ -1491,11 +1579,14 @@ class MergeService:
             raise ValueError("两个联赛的赛事类别不一致（青年/预备队/女子），不能绑定。")
         with self._mapping_lock:
             saved = self.store.map_leagues(ps_league, crown_league)
-            return {**saved, **self._auto_after_refresh()}
+            result = {**saved, **self._auto_after_refresh()}
+            self.invalidate_payload()
+            return result
 
     def unbind_league(self, crown_league_id: str) -> None:
         with self._mapping_lock:
             self.store.unmap_league(crown_league_id)
+            self.invalidate_payload()
 
     def bind_fixture(self, ps38_id: str, crown_id: str) -> Dict[str, Any]:
         pools = self._catalog()
@@ -1518,10 +1609,13 @@ class MergeService:
                      for item in self.store.list_league_mappings()}
             if pairs.get(crown_event["leagueId"]) != ps_event["leagueId"]:
                 raise ValueError("请先绑定对应联赛；不能跨联赛合并比赛。")
-            return self.store.map_events(ps_event, crown_snapshot)
+            saved = self.store.map_events(ps_event, crown_snapshot)
+            self.invalidate_payload()
+            return saved
 
     def unbind_fixture(self, ps38_id: str) -> None:
         self.store.unmap(ps38_id)
+        self.invalidate_payload()
 
     def auto_merge(self) -> Dict[str, Any]:
         """Match only confirmed league pairs using hdproc's two-team identity gate.
@@ -1574,6 +1668,8 @@ class MergeService:
                 used_ps.add(event["id"])
                 used_crown.add(crown["id"])
                 mapped.append({**saved, "score": score})
+            if mapped:
+                self.invalidate_payload()
             return {
                 "ok": True, "mappedLeagues": [], "mappedFixtures": mapped,
                 "skippedLeagues": [], "skippedFixtures": skipped,

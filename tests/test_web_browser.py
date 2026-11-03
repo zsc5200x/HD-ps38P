@@ -77,6 +77,8 @@ class WebBrowserTests(unittest.TestCase):
         self.blocked_requests = []
         self.unexpected_api_requests = []
         self.fail_save = False
+        self.merge_response_sequence = None
+        self.merge_request_count = 0
         self.context = self.browser.new_context(service_workers="block", locale="zh-CN")
         self.addCleanup(self.context.close)
         self.context.route("**/*", self.route_request)
@@ -101,6 +103,14 @@ class WebBrowserTests(unittest.TestCase):
         if parsed.path == "/api/pool/save" and self.fail_save:
             route.fulfill(status=503, json={"ok": False, "error": "模拟保存失败，请稍后重试"})
             return
+        if parsed.path == "/api/merge":
+            self.merge_request_count += 1
+            if self.merge_response_sequence is not None:
+                payload = self.merge_response_sequence[0]
+                if len(self.merge_response_sequence) > 1:
+                    payload = self.merge_response_sequence.pop(0)
+                route.fulfill(json=payload)
+                return
         responses = {
             "/api/status": {"ok": True, "session": {"status": "online"}, "backfill": {}},
             "/api/my-events": {"ok": True, "ready": True, "rows": [], "total": 0, "agents": []},
@@ -191,6 +201,48 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator('[data-pool-filter="all"]')).to_have_attribute(
             "aria-pressed", "true"
         )
+
+    def test_merge_cold_response_waits_for_ready_data_before_showing_empty_state(self):
+        self.merge_response_sequence = [
+            {"ok": True, "ready": False, "refreshing": True},
+            {
+                "ok": True,
+                "ready": True,
+                "refreshing": False,
+                "generatedAt": "2026-11-04T12:00:00+08:00",
+                "sources": {
+                    "ps38": {"ok": True, "count": 1, "leagueCount": 1},
+                    "crown": {"ok": True, "count": 1, "leagueCount": 1},
+                },
+                "counts": {"leagueMappings": 0, "fixtureMappings": 0},
+                "ps38Events": [],
+                "crownEvents": [],
+                "ps38Leagues": [],
+                "crownLeagues": [],
+                "leagueMappings": [],
+                "mappings": [],
+                "leagueSuggestions": [],
+                "suggestions": [],
+            },
+        ]
+        self.page.goto(f"{self.origin}/#/merge")
+        fixtures = self.page.locator("#mergeFixtures")
+        self.expect(fixtures).to_contain_text("正在准备赛事匹配数据…")
+        self.expect(fixtures).not_to_contain_text("当前暂无皇冠比赛")
+        self.expect(self.page.locator("#mergeAuto")).to_be_disabled()
+
+        self.expect(self.page.locator("#mergeUpdated")).to_have_text("更新 12:00:00")
+        self.assertEqual(self.merge_request_count, 2)
+        self.expect(fixtures).to_contain_text("当前暂无皇冠比赛")
+        self.expect(self.page.locator("#mergeAuto")).to_be_enabled()
+
+    def test_merge_stops_cold_start_polling_after_leaving_page(self):
+        self.merge_response_sequence = [{"ok": True, "ready": False, "refreshing": True}]
+        self.page.goto(f"{self.origin}/#/merge")
+        self.expect(self.page.locator("#mergeFixtures")).to_contain_text("正在准备赛事匹配数据…")
+        self.page.locator('[data-page-link="home"]').click()
+        self.page.wait_for_timeout(650)
+        self.assertEqual(self.merge_request_count, 1)
 
     def test_failed_pool_save_shows_error_and_keeps_the_page_usable(self):
         self.fail_save = True

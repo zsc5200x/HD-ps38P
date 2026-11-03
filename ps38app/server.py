@@ -768,7 +768,7 @@ class Handler(BaseHTTPRequestHandler):
         if service is None:
             return
         try:
-            payload = service.payload()
+            payload = service.request_payload()
         except Exception as exc:  # noqa: BLE001 - surface the cause to the page
             self.send_json({"ok": False, "error": f"合并数据读取失败：{exc}"}, status=500)
             return
@@ -960,6 +960,8 @@ class DashboardServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         if self.follow_service is not None:
             self.follow_service.stop()
+        if self.merge_service is not None:
+            self.merge_service.close()
         super().server_close()
 
 

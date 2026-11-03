@@ -2,6 +2,7 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -127,20 +128,28 @@ class MergeApiTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.server.merge_service._crown_cache = None
         self.server.merge_service._pinnacle_cache = None
+        self.server.merge_service.invalidate_payload()
         with self.server.merge_service.store._connect() as connection:
             connection.execute("DELETE FROM fixture_mappings")
             connection.execute("DELETE FROM league_mappings")
 
-    def request(self, method, path, payload=None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
-        try:
-            body = json.dumps(payload).encode("utf-8") if payload is not None else b""
-            headers = {"Content-Type": "application/json"} if payload is not None else {}
-            connection.request(method, path, body=body, headers=headers)
-            response = connection.getresponse()
-            return response.status, json.loads(response.read())
-        finally:
-            connection.close()
+    def request(self, method, path, payload=None, *, wait_merge=True):
+        deadline = time.monotonic() + 5
+        while True:
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+            try:
+                body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+                headers = {"Content-Type": "application/json"} if payload is not None else {}
+                connection.request(method, path, body=body, headers=headers)
+                response = connection.getresponse()
+                result = response.status, json.loads(response.read())
+            finally:
+                connection.close()
+            if (not wait_merge or method != "GET" or path != "/api/merge"
+                    or result[0] != 200 or result[1].get("ready") is not False
+                    or time.monotonic() >= deadline):
+                return result
+            time.sleep(0.01)
 
     def reset_cache(self):
         self.server.merge_service._crown_cache = None
@@ -202,6 +211,38 @@ class MergeApiTests(unittest.TestCase):
             status, refreshed = self.request("GET", "/api/merge")
             self.assertEqual(refreshed["matchEvents"], [])
             self.assertEqual([e["id"] for e in refreshed["crownEvents"]], ["crown-1"])
+
+    def test_cold_merge_request_returns_quickly_and_builds_only_once(self):
+        self.reset_cache()
+        self.server.merge_service.invalidate_payload()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_crown_fetch(_config):
+            entered.set()
+            release.wait(timeout=2)
+            return [CROWN_RAW], None, store.now_iso()
+
+        with mock.patch("ps38app.fixture_merge.fetch_crown_events", side_effect=slow_crown_fetch) as fetch:
+            started = time.monotonic()
+            status, initial = self.request("GET", "/api/merge", wait_merge=False)
+            self.assertEqual(status, 200)
+            self.assertFalse(initial["ready"])
+            self.assertTrue(initial["refreshing"])
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertTrue(entered.wait(timeout=1))
+
+            status, repeated = self.request("GET", "/api/merge", wait_merge=False)
+            self.assertEqual(status, 200)
+            self.assertFalse(repeated["ready"])
+            self.assertEqual(fetch.call_count, 1)
+
+            release.set()
+            status, ready = self.request("GET", "/api/merge")
+            self.assertEqual(status, 200)
+            self.assertTrue(ready["ready"])
+            self.assertFalse(ready["refreshing"])
+            self.assertEqual(ready["crownEvents"][0]["id"], "crown-1")
 
     def test_auto_merge_is_explicit_and_unique(self):
         self.reset_cache()
