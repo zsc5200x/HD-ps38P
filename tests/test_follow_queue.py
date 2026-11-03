@@ -93,7 +93,7 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(second["status"], "GROUPING")
             self.clock.now += 21
             self.call_without_network_wait()
-            self.assertEqual(self.service.detail(second["id"])["group"]["status"], "READY")
+            self.assertEqual(self.service.detail(second["id"])["group"]["status"], "WAIT_ACCOUNT")
             self.assertEqual(len(self.executor.prepared), 1)
             with self.service.store.connect() as connection:
                 claims = connection.execute("SELECT * FROM follow_claims").fetchall()
@@ -102,6 +102,10 @@ class QueueTests(unittest.TestCase):
 
             self.executor.on_prepare = None
             release.set()
+            self.wait_background(
+                lambda: self.service.detail(first["id"])["group"]["status"] == "SUCCEEDED"
+            )
+            self.clock.now += 1
             self.wait_background(
                 lambda: all(group["status"] == "SUCCEEDED" for group in self.groups())
             )
@@ -545,9 +549,14 @@ class QueueTests(unittest.TestCase):
         self.executor.result = None
         self.tick(21)
         queued = next(group for group in self.groups() if group["id"] != unknown_id)
-        self.assertEqual(queued["status"], "READY")
+        self.assertEqual(queued["status"], "WAIT_ACCOUNT")
         self.assertIn("核对", queued["message"] + queued.get("waiting_reason", ""))
         self.assertEqual(len(self.executor.submitted), 1)
+        with self.service.store.connect() as connection:
+            stored_account_id = connection.execute(
+                "SELECT account_id FROM follow_groups WHERE id=?", (unknown_id,)
+            ).fetchone()[0]
+        self.assertEqual(stored_account_id, "crown-test")
         self.service.resolve_unknown(
             unknown_id,
             {

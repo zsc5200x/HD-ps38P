@@ -15,7 +15,8 @@ const state = {
 const labels = {
   SUCCEEDED: ["跟单成功", "success"], UNKNOWN: ["待核对", "unknown"],
   GROUPING: ["合组中", "processing"], WAIT_MAPPING: ["等待赛事匹配", "processing"],
-  READY: ["等待处理", "processing"], WAIT_MARKET: ["等待盘口", "processing"],
+  READY: ["等待处理", "processing"], WAIT_ACCOUNT: ["等待可用会员", "processing"],
+  WAIT_MARKET: ["等待盘口", "processing"],
   PREPARING: ["核验盘口中", "processing"], RETRY_WAIT: ["等待重试", "processing"],
   PREPARED: ["已匹配盘口", "processing"], SUBMITTING: ["提交中", "processing"],
   REJECTED: ["已拒绝", "failed"], FAILED: ["失败", "failed"],
@@ -27,7 +28,8 @@ const periodLabels = { FT: "全场", HT: "上半场" };
 const marketLabels = { HANDICAP: "让球", TOTAL: "大小" };
 const terminalStatuses = new Set(["SUCCEEDED", "REJECTED", "FAILED", "SKIPPED", "EXPIRED"]);
 const stageLabels = {
-  GROUPING: "合组", WAIT_MAPPING: "赛事匹配", READY: "排队", WAIT_MARKET: "等待盘口",
+  GROUPING: "合组", WAIT_MAPPING: "赛事匹配", READY: "排队", WAIT_ACCOUNT: "分配会员",
+  WAIT_MARKET: "等待盘口",
   PREPARING: "查盘", RETRY_WAIT: "重试等待", PREPARED: "盘口就绪", SUBMITTING: "提交",
   SUCCEEDED: "完成", REJECTED: "结束", FAILED: "结束", SKIPPED: "跳过", EXPIRED: "过期",
   UNKNOWN: "待核对", LATE_ORDER: "迟到核对",
@@ -82,6 +84,10 @@ function accountName(id) {
   return account ? account.label || account.name || account.username || id : display(id);
 }
 
+function followEligible(account) {
+  return account.follow_eligible === true;
+}
+
 function lineLabel(value, side, kind) {
   const raw = display(value);
   const signed = kind === "HANDICAP" && Number(value) > 0 ? `+${raw}` : raw;
@@ -119,27 +125,6 @@ function amountHelp() {
     : "每组使用一次固定金额，按人民币整元计算。";
 }
 
-function populateAccounts(accounts, selected) {
-  const options = [node("option", "请选择皇冠账号")];
-  options[0].value = "";
-  for (const account of accounts) {
-    if (account.platform && account.platform !== "crown_member") continue;
-    const online = account.enabled !== false && account.status === "online";
-    const option = node("option", `${account.label || account.name || account.username || account.id}${online ? " · 在线" : " · 不可用"}`);
-    option.value = account.id;
-    option.disabled = !online;
-    options.push(option);
-  }
-  if (selected && !options.some((option) => option.value === selected)) {
-    const option = node("option", `${selected} · 账号不可用`);
-    option.value = selected;
-    option.disabled = true;
-    options.push(option);
-  }
-  $("copyAccount").replaceChildren(...options);
-  $("copyAccount").value = selected || "";
-}
-
 function populateRule(rule) {
   $("copyDirection").value = rule.direction || "forward";
   $("copyAmountMode").value = rule.amount_mode || "fixed";
@@ -148,7 +133,6 @@ function populateRule(rule) {
   $("copyMinOdds").value = rule.min_odds ?? "";
   $("copyMaxOdds").value = rule.max_odds ?? "";
   $("copyMembers").value = Array.isArray(rule.member_codes) ? rule.member_codes.join(", ") : "";
-  populateAccounts(state.accounts, rule.account_id);
   syncRuleControls();
   amountHelp();
 }
@@ -179,15 +163,17 @@ function renderService(payload, forceForm) {
   state.accounts = Array.isArray(payload.accounts) ? payload.accounts : state.accounts;
   const direction = rule.direction === "reverse" ? "反向" : "正向";
   const amount = rule.amount_mode === "ratio" ? `原单合计 × ${display(rule.amount_value)}%` : `每组 ${display(rule.amount_value)} 元`;
-  $("copyRuleSummary").textContent = `${enabled ? "已启用" : "已暂停"} · ${direction} · ${amount} · 20 秒合组`;
+  $("copyRuleSummary").textContent = `${enabled ? "已启用" : "已暂停"} · ${direction} · ${amount} · 20 秒合组 · 号池自动分配`;
   if (!state.dirty || forceForm) populateRule(rule);
   const stateChip = $("cfgRuleState");
   if (stateChip) {
     stateChip.textContent = enabled ? "已启用" : "已暂停";
     stateChip.className = `cfg-chip ${enabled ? "cfg-chip-on" : "cfg-chip-muted"}`;
   }
-  const accountLabel = $("cfgRuleAccount");
-  if (accountLabel) accountLabel.textContent = accountName(rule.account_id) || "—";
+  const eligibleCount = state.accounts.filter(followEligible).length;
+  setText("cfgAccountPoolSummary", eligibleCount
+    ? `${eligibleCount} 个自动分配候选；执行前校验会话，忙账号不重复占用。`
+    : "暂无自动分配候选；执行前校验会话，忙账号不重复占用。");
   $("copyPause").disabled = !enabled || state.mutating;
   $("copySaveRule").disabled = state.mutating;
   $("copyEnableRule").disabled = state.mutating;
@@ -235,10 +221,11 @@ function renderBoard() {
   const rule = state.rule || {};
   const accounts = state.accounts.filter((account) => !account.platform || account.platform === "crown_member");
   const online = accounts.filter((account) => account.enabled !== false && account.status === "online");
-  const active = Math.min(Number(service.active_tasks || 0), online.length);
+  const eligible = accounts.filter(followEligible);
+  const active = Math.min(Number(service.active_tasks || 0), eligible.length);
   setText("copyOnlineMembers", number(online.length, 0));
-  setText("copyIdleMembers", number(Math.max(0, online.length - active), 0));
-  setText("copyBusyMembers", number(active, 0));
+  setText("copyIdleMembers", number(Math.max(0, eligible.length - active), 0));
+  setText("copyBusyMembers", number(Math.min(active, eligible.length), 0));
   setText("copyOfflineMembers", number(accounts.length - online.length, 0));
   setText("copyQueuedTasks", number(service.queued_tasks ?? 0, 0));
   setText("copyActiveTasks", number(service.active_tasks ?? 0, 0));
@@ -268,7 +255,7 @@ function renderBoard() {
     ["跟单金额", ruleAmountLabel(rule)],
     ["合组窗口", `${number(rule.window_seconds ?? 20, 0)} 秒`],
     ["跟单方向", rule.direction === "reverse" ? "反向跟单" : "正向跟单"],
-    ["目标账号", accountName(rule.account_id)],
+    ["执行账号", `号池自动分配 · ${number(eligible.length, 0)} 个候选`],
   ];
   const list = $("copyParamList");
   if (list) {
@@ -290,7 +277,6 @@ function renderPool(accounts) {
     list.replaceChildren(node("p", "号池暂未返回皇冠会员账号，请到「号池管理」添加。", "copy-pool-empty"));
     return;
   }
-  const rule = state.rule || {};
   const fragment = document.createDocumentFragment();
   for (const account of accounts) {
     const name = account.label || account.name || account.username || account.id;
@@ -301,6 +287,7 @@ function renderPool(accounts) {
       .filter((value) => value !== null);
     const times = own.map((row) => row.updated_at || row.created_at).filter(Boolean).sort();
     const isOnline = account.enabled !== false && account.status === "online";
+    const isEligible = followEligible(account);
 
     const card = node("article", null, "copy-pool-card");
     const avatar = node("span", String(name).slice(0, 1).toUpperCase(), "copy-pool-avatar");
@@ -323,7 +310,11 @@ function renderPool(accounts) {
       metrics.append(cell);
     }
     body.append(title, metrics);
-    if (rule.account_id && rule.account_id === account.id) body.append(node("span", "当前规则账号", "copy-pool-bind"));
+    body.append(node(
+      "span",
+      isEligible ? "自动分配候选" : isOnline ? "会话校验未通过" : "不参与自动分配",
+      `copy-pool-assignment${isEligible ? " is-eligible" : ""}`,
+    ));
     card.append(avatar, body);
     fragment.append(card);
   }
@@ -498,7 +489,7 @@ function updateFilters() {
   }
   const hints = {
     SUCCEEDED: "展示已收到成功回执的真实跟单订单。",
-    PROCESSING: "查看合组、排队、盘口核验、重试等待和提交中的任务。",
+    PROCESSING: "查看合组、账号分配、盘口核验、重试等待和提交中的任务。",
     FAILED: "查看未完成的任务及具体原因。",
     UNKNOWN: "这些任务尚未取得确定结果，不会自动重复提交。",
     ALL: "按原单窗口时间展示全部跟单组及处理进度。",
@@ -580,7 +571,7 @@ function setBusy(busy) {
 function formValue(enabled) {
   return {
     enabled, direction: $("copyDirection").value, amount_mode: $("copyAmountMode").value,
-    amount_value: $("copyAmountValue").value, account_id: $("copyAccount").value,
+    amount_value: $("copyAmountValue").value,
     max_age_seconds: Number($("copyMaxAge").value),
     min_odds: $("copyMinOdds").value || null, max_odds: $("copyMaxOdds").value || null,
     member_codes: $("copyMembers").value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean),

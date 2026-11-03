@@ -75,6 +75,7 @@ class FollowIntegrationTests(unittest.TestCase):
             transport=self.transport,
             session_loader=lambda account: {**crown_samples.SESSION, "id": account},
             clock=lambda: self.now,
+            account_provider=lambda: ["test-account"],
         )
         self.service = FollowService(self.config, executor=adapter, clock=lambda: self.now)
         poller = StubPoller({"total": 0, "open": 0, "settled": 0, "live": 0})
@@ -185,6 +186,7 @@ class FollowIntegrationTests(unittest.TestCase):
         self.assertEqual(page["total"], 1)
         group = page["rows"][0]
         self.assertEqual((group["status"], group["receipt_id"]), ("SUCCEEDED", "LOCAL-RECEIPT-1"))
+        self.assertEqual(group["account_id"], "test-account")
         self.assertEqual(
             (group["order_count"], group["source_stake"], group["accepted_stake"]), (2, "300", "30")
         )

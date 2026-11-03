@@ -12,7 +12,6 @@ DEFAULT_RULE = {
     "direction": "forward",
     "amount_mode": "fixed",
     "amount_value": "",
-    "account_id": "",
     "currency": "CNY",
     "max_age_seconds": 120,
     "min_odds": None,
@@ -39,9 +38,8 @@ def validate_rule(payload, previous=None):
         raise ValueError("金额模式必须是固定金额或比例")
     if rule["scope"] != "live":
         raise ValueError("首版仅支持滚球")
-    rule["account_id"] = str(rule["account_id"] or "").strip()
-    if rule["account_id"] and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", rule["account_id"]):
-        raise ValueError("账号标识无效")
+    # 老规则可能保存了固定账号；规则现在只配置行为，执行账号由号池动态分配。
+    rule.pop("account_id", None)
     # 保留旧接口字段兼容，但币种已固定为人民币，不再由表单或旧配置决定。
     rule["currency"] = "CNY"
     amount = rule["amount_value"]
@@ -77,8 +75,8 @@ def validate_rule(payload, previous=None):
     rule["member_codes"] = sorted({str(value).strip() for value in members if str(value).strip()})
     if any(len(value) > 80 for value in rule["member_codes"]):
         raise ValueError("会员标识过长")
-    if rule["enabled"] and not all((rule["account_id"], rule["amount_value"])):
-        raise ValueError("启用前请设置皇冠账号和金额或比例")
+    if rule["enabled"] and not rule["amount_value"]:
+        raise ValueError("启用前请设置跟单金额或比例")
     rule["id"] = "default"
     rule["window_seconds"] = 20
     rule["rounding"] = "down_integer"

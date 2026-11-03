@@ -292,7 +292,11 @@ class Handler(BaseHTTPRequestHandler):
                 offset=offset,
             )
             try:
-                payload["accounts"] = self._follow_accounts()
+                accounts = self._follow_accounts()
+                available = set(service.available_account_ids())
+                for account in accounts:
+                    account["follow_eligible"] = account["id"] in available
+                payload["accounts"] = accounts
             except Exception:
                 payload["accounts"] = []
                 payload["account_warning"] = "账号列表暂不可用，请在号池检查账号"

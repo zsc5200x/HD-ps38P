@@ -92,6 +92,7 @@ class FollowService:
         with _SERVICES_LOCK:
             _SERVICES[self._owner_id] = self
         self.store.recover_inflight(self.clock(), _owner_alive)
+        self._migrate_fixed_account_rule()
         self._normalize_pending_currencies()
 
     def _normalize_pending_currencies(self):
@@ -127,6 +128,53 @@ class FollowService:
 
                 self.executor = CrownAdapter(self.config, should_stop=self._stop.is_set)
             return self.executor
+
+    def _available_account_ids(self):
+        provider = getattr(self._executor(), "available_accounts", None)
+        if not callable(provider):
+            return []
+        try:
+            values = provider()
+        except Exception:
+            return []
+        if not isinstance(values, (list, tuple)):
+            return []
+        return list(
+            dict.fromkeys(
+                value
+                for item in values
+                if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value := str(item or "").strip())
+            )
+        )
+
+    def _migrate_fixed_account_rule(self):
+        with self.store.connect(write=True) as connection:
+            rule = self.store.rule(connection)
+            if "account_id" in rule:
+                rule.pop("account_id", None)
+                self.store.save_rule(connection, rule)
+            for group in self.store.active_groups(connection):
+                if group["status"] not in {
+                    "GROUPING",
+                    "WAIT_MAPPING",
+                    "WAIT_ACCOUNT",
+                    "READY",
+                    "WAIT_MARKET",
+                    "PREPARED",
+                    "RETRY_WAIT",
+                }:
+                    continue
+                if connection.execute(
+                    "SELECT 1 FROM follow_attempts WHERE group_id=? LIMIT 1", (group["id"],)
+                ).fetchone():
+                    continue
+                if connection.execute(
+                    "SELECT 1 FROM follow_claims WHERE group_id=? LIMIT 1", (group["id"],)
+                ).fetchone():
+                    continue
+                group["account_id"] = ""
+                group.get("rule", {}).pop("account_id", None)
+                self.store.save_group(connection, group)
 
     def _dispatch(self, key, account_id, function, *args):
         with self._lock:
@@ -191,6 +239,9 @@ class FollowService:
         result["service"]["running"] = bool(self._thread and self._thread.is_alive())
         return result
 
+    def available_account_ids(self):
+        return self._available_account_ids()
+
     def detail(self, group_id):
         return self.store.detail(str(group_id))
 
@@ -220,8 +271,8 @@ class FollowService:
             with self.store.connect(write=True) as connection:
                 previous = self.store.rule(connection)
                 rule = validate_rule(payload, previous)
-                if rule["enabled"]:
-                    self._executor().validate_account(rule["account_id"], rule["currency"])
+                if rule["enabled"] and not self._available_account_ids():
+                    raise ValueError("启用前请在号池准备至少一个启用、在线且会话有效的皇冠会员")
                 # 每次从暂停转为启用都只接收启用之后的新单，不补处理暂停期间订单。
                 cursor = (
                     self._latest_cursor() if rule["enabled"] and not previous["enabled"] else None
@@ -340,7 +391,11 @@ class FollowService:
                 group
                 for group in groups
                 if group["status"] != "PREPARING"
-                and (now * 1000 >= group["deadline_ms"] or now >= group.get("next_check_at", 0))
+                and (
+                    now * 1000 >= group["deadline_ms"]
+                    or group.get("next_check_at") is None
+                    or now >= group.get("next_check_at", 0)
+                )
             ]
             for group in due_groups[:100]:
                 if self._stop.is_set():
@@ -405,7 +460,7 @@ class FollowService:
             "currency": intent["currency"],
             "order_count": 0,
             "member_count": 0,
-            "account_id": rule["account_id"],
+            "account_id": "",
             "score": intent["score"],
             "odds": None,
             "odds_format": "HK",
@@ -549,10 +604,111 @@ class FollowService:
         with self.store.connect() as connection:
             return self.store.rule(connection)["enabled"] and not self._stop.is_set()
 
+    def _assign_ready_account(self, group_id, *, background=False):
+        accounts = self._available_account_ids()
+        now = self.clock()
+        with self._lock, self.store.connect(write=True) as connection:
+            group = self.store.get_group(connection, group_id)
+            if group is None or group["status"] != "READY":
+                return None
+            if background and self._dispatcher and self._dispatcher.available_slots() == 0:
+                group.update(
+                    account_id="",
+                    next_check_at=now + 0.25,
+                    next_action_at=iso_time(now + 0.25),
+                    waiting_reason="等待可用执行名额",
+                    message="跟单任务排队中",
+                    updated_at=iso_time(now),
+                )
+                self.store.save_group(connection, group)
+                return None
+            if not accounts:
+                group.update(
+                    account_id="",
+                    status="WAIT_ACCOUNT",
+                    next_check_at=now + 2,
+                    next_action_at=iso_time(now + 2),
+                    waiting_reason="号池没有启用、在线且会话有效的皇冠会员",
+                    message="等待号池恢复可用皇冠会员",
+                    error_category="ACCOUNT_UNAVAILABLE",
+                    updated_at=iso_time(now),
+                )
+                self.store.save_group(connection, group)
+                return None
+            busy = {
+                str(row[0])
+                for row in connection.execute("SELECT account_id FROM follow_claims").fetchall()
+            }
+            busy.update(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT account_id FROM follow_groups WHERE status='UNKNOWN' "
+                    "AND account_id<>''"
+                ).fetchall()
+            )
+            busy.update(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT account_id FROM follow_groups "
+                    "WHERE id<>? AND status IN ('READY','PREPARING','SUBMITTING') "
+                    "AND account_id<>''",
+                    (group_id,),
+                ).fetchall()
+            )
+            if background and self._dispatcher:
+                busy.update(self._dispatcher.active_accounts())
+            free = [account_id for account_id in accounts if account_id not in busy]
+            if not free:
+                group.update(
+                    account_id="",
+                    status="WAIT_ACCOUNT",
+                    next_check_at=now + 1,
+                    next_action_at=iso_time(now + 1),
+                    waiting_reason="可用皇冠会员正在执行或有未知结果待核对",
+                    message="等待皇冠会员空闲",
+                    error_category="ACCOUNT_BUSY",
+                    updated_at=iso_time(now),
+                )
+                self.store.save_group(connection, group)
+                return None
+            used = set()
+            for row in connection.execute(
+                "SELECT payload FROM follow_attempts WHERE group_id=?", (group_id,)
+            ).fetchall():
+                try:
+                    account_id = str(json.loads(row[0]).get("account_id") or "")
+                except (TypeError, ValueError):
+                    account_id = ""
+                if account_id:
+                    used.add(account_id)
+            cursor = str(self.store.meta(connection, "account_rotation_cursor", "") or "")
+            start = accounts.index(cursor) + 1 if cursor in accounts else 0
+            ordered = accounts[start:] + accounts[:start]
+            candidates = [account_id for account_id in ordered if account_id in free]
+            selected = next(
+                (account_id for account_id in candidates if account_id not in used), None
+            )
+            if selected is None:
+                selected = candidates[0]
+            group.update(
+                account_id=selected,
+                next_check_at=now,
+                next_action_at=None,
+                waiting_reason="已从在线皇冠会员池分配执行账号",
+                message="订单组已分配皇冠会员，等待执行",
+                error_category="",
+                updated_at=iso_time(now),
+            )
+            self.store.save_group(connection, group)
+            self.store.set_meta(connection, "account_rotation_cursor", selected)
+            return selected
+
     def _advance(self, group_id, *, background=False):
         # 调度循环只做本地校验与排队，网络请求在独立执行线程内完成。
         with self._lock:
             if not self._enabled():
+                return
+            if background and self._dispatcher and self._dispatcher.is_key_active(group_id):
                 return
             with self.store.connect() as connection:
                 group = self.store.get_group(connection, group_id)
@@ -563,7 +719,7 @@ class FollowService:
             if now * 1000 >= group["deadline_ms"]:
                 self._set_status(group, "EXPIRED", "超过最长源单处理时效")
                 return
-            if now < group.get("next_check_at", 0):
+            if group.get("next_check_at") is not None and now < group["next_check_at"]:
                 return
             try:
                 mapping = resolve_fixture(self.config["merge_db_path"], group["intent"])
@@ -591,11 +747,36 @@ class FollowService:
             except ValueError as exc:
                 self._set_status(group, "SKIPPED", str(exc))
                 return
-            group.update(next_action_at=None, waiting_reason="等待可用执行名额")
+            group.update(
+                next_check_at=now,
+                next_action_at=None,
+                waiting_reason="等待在线皇冠会员自动分配",
+            )
             if not self._set_status(group, "READY", "订单组已冻结，等待执行"):
                 return
+        account_id = self._assign_ready_account(group_id, background=background)
+        if account_id is None:
+            return
         if background:
-            self._dispatch(group_id, group["account_id"], self._execute_group, group_id)
+            if self._dispatch(group_id, account_id, self._execute_group, group_id) is None:
+                with self._lock, self.store.connect(write=True) as connection:
+                    current = self.store.get_group(connection, group_id)
+                    if (
+                        current
+                        and current["status"] == "READY"
+                        and current.get("account_id") == account_id
+                    ):
+                        current.update(
+                            account_id="",
+                            status="WAIT_ACCOUNT",
+                            next_check_at=self.clock() + 1,
+                            next_action_at=iso_time(self.clock() + 1),
+                            waiting_reason="等待执行名额，稍后重新分配会员",
+                            message="跟单任务排队中",
+                            error_category="ACCOUNT_BUSY",
+                            updated_at=iso_time(self.clock()),
+                        )
+                        self.store.save_group(connection, current)
         else:
             self._execute_group(group_id)
 
@@ -624,6 +805,17 @@ class FollowService:
                 if not self.store.claim(
                     connection, group, self._owner_id, os.getpid(), "PREPARING", self.clock()
                 ):
+                    group.update(
+                        account_id="",
+                        status="WAIT_ACCOUNT",
+                        next_check_at=self.clock() + 1,
+                        next_action_at=iso_time(self.clock() + 1),
+                        waiting_reason="皇冠会员刚被其他任务占用，等待重新分配",
+                        message="等待皇冠会员空闲",
+                        error_category="ACCOUNT_BUSY",
+                        updated_at=iso_time(self.clock()),
+                    )
+                    self.store.save_group(connection, group)
                     return
                 group.update(
                     status="PREPARING",

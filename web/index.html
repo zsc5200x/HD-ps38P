@@ -460,7 +460,7 @@
         <div class="cfg-toolbar">
           <div class="cfg-toolbar-copy">
             <span class="cfg-toolbar-title">跟单规则</span>
-            <span id="copyRuleSummary" class="cfg-toolbar-summary">设置方向、金额和皇冠账号</span>
+            <span id="copyRuleSummary" class="cfg-toolbar-summary">设置跟单规则，执行账号由号池自动分配</span>
             <span id="copyRuleDirty" class="cfg-toolbar-dirty" hidden>有未保存修改</span>
           </div>
           <div class="cfg-toolbar-actions">
@@ -509,10 +509,10 @@
                     <input id="copyAmountValue" name="amount_value" type="number" min="1" step="1" required inputmode="decimal" aria-describedby="copyAmountHelp">
                     <small id="copyAmountHelp" class="cfg-help">每组使用一次固定金额，按人民币整元计算。</small>
                   </div>
-                  <div class="cfg-field">
-                    <label class="cfg-label" for="copyAccount">皇冠账号</label>
-                    <select id="copyAccount" name="account_id" required><option value="">请选择皇冠账号</option></select>
-                    <small class="cfg-help">账号会话由号池管理。</small>
+                  <div class="cfg-field copy-auto-assignment">
+                    <span class="cfg-label">执行账号</span>
+                    <strong>启用会员自动分配</strong>
+                    <small id="cfgAccountPoolSummary" class="cfg-help">执行前校验会话，忙账号不重复占用。</small>
                   </div>
                 </div>
 
@@ -620,10 +620,9 @@
                 </div>
 
                 <div class="cfg-account-row">
-                  <span class="cfg-label">单账号比例</span>
-                  <strong id="cfgRuleAccount">—</strong>
-                  <span class="cfg-static">全局 100%</span>
-                  <span class="cfg-chip cfg-chip-muted">待接入</span>
+                  <span class="cfg-label">账号调度</span>
+                  <strong>自动轮转可用会员</strong>
+                  <span class="cfg-chip cfg-chip-muted">号池调度</span>
                 </div>
 
                 <div class="cfg-pair">

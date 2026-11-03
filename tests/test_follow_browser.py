@@ -59,7 +59,6 @@ class FollowBrowserTests(unittest.TestCase):
             "direction": "reverse",
             "amount_mode": "ratio",
             "amount_value": "10",
-            "account_id": "crown-local",
             "currency": "CNY",
             "max_age_seconds": 120,
             "min_odds": None,
@@ -75,6 +74,16 @@ class FollowBrowserTests(unittest.TestCase):
                 "platform": "crown_member",
                 "status": "online",
                 "enabled": True,
+                "follow_eligible": True,
+            },
+            {
+                "id": "crown-invalid-session",
+                "label": "会话失效账号",
+                "username": "expired-fixture",
+                "platform": "crown_member",
+                "status": "online",
+                "enabled": True,
+                "follow_eligible": False,
             }
         ]
         common = {
@@ -154,6 +163,7 @@ class FollowBrowserTests(unittest.TestCase):
                         "GROUPING",
                         "WAIT_MAPPING",
                         "READY",
+                        "WAIT_ACCOUNT",
                         "PREPARING",
                         "WAIT_MARKET",
                         "RETRY_WAIT",
@@ -179,7 +189,7 @@ class FollowBrowserTests(unittest.TestCase):
                         "running": True,
                         "scope": "live",
                         "active_tasks": 1,
-                        "queued_tasks": 2,
+                        "queued_tasks": 3,
                     },
                     "rule": self.rule,
                     "summary": {"succeeded": 1, "unknown": 1, "total": len(self.records)},
@@ -332,6 +342,13 @@ class FollowBrowserTests(unittest.TestCase):
                     "next_action_at": "2026-11-03T08:00:30+08:00",
                     "reconcile_count": 3,
                 },
+                {
+                    **self.records[1],
+                    "id": "wait-account-1",
+                    "status": "WAIT_ACCOUNT",
+                    "waiting_reason": "可用皇冠会员正在执行或有未知结果待核对",
+                    "error_category": "ACCOUNT_BUSY",
+                },
             ]
         )
         self.history["retry-1"] = [
@@ -353,19 +370,22 @@ class FollowBrowserTests(unittest.TestCase):
         ]
         self.open_page()
         self.expect(self.page.locator("#copyActiveTasks")).to_have_text("1")
-        self.expect(self.page.locator("#copyQueuedTasks")).to_have_text("2")
+        self.expect(self.page.locator("#copyQueuedTasks")).to_have_text("3")
         self.page.locator('[data-copy-filter="PROCESSING"]').click()
-        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(2)
+        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(3)
         self.expect(self.page.locator("#copyRows")).to_contain_text("核验盘口中")
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待重试")
+        self.expect(self.page.locator("#copyRows")).to_contain_text("等待可用会员")
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待最新报价")
         self.expect(self.page.locator("#copyRows")).to_contain_text("下次动作")
         self.expect(self.page.locator("#copyRows")).to_contain_text("查盘 2 · 重试 1 · 核对 3")
         self.expect(self.page.locator("#copyRows")).to_contain_text("MARKET_UNAVAILABLE")
         # 左侧看板与会员池使用同一次 /api/follow 响应，不额外请求接口。
-        self.expect(self.page.locator("#copyOnlineMembers")).to_have_text("1")
+        self.expect(self.page.locator("#copyOnlineMembers")).to_have_text("2")
         self.expect(self.page.locator("#copyPoolList")).to_contain_text("皇冠测试账号")
-        self.expect(self.page.locator("#copyLogBody [data-copy-group]")).to_have_count(2)
+        self.expect(self.page.locator("#copyPoolList")).to_contain_text("自动分配候选")
+        self.expect(self.page.locator("#copyPoolList")).to_contain_text("会话校验未通过")
+        self.expect(self.page.locator("#copyLogBody [data-copy-group]")).to_have_count(3)
         self.expect(self.page.locator("#copyLogBody")).to_contain_text("等待最新报价")
         self.page.locator('[data-copy-detail="retry-1"]').click()
         self.expect(self.page.locator("#copyDetailContent")).to_contain_text("状态历史")
@@ -584,6 +604,10 @@ class FollowBrowserTests(unittest.TestCase):
         # 跟单规则已移到设置页，跟单页按钮只负责跳转。
         self.page.locator("#copyRulesToggle").click()
         self.expect(self.page.locator('[data-page-panel="settings"]')).to_be_visible()
+        self.expect(self.page.locator("#copyAccount")).to_have_count(0)
+        self.expect(self.page.locator('#copyRuleForm [name="account_id"]')).to_have_count(0)
+        self.expect(self.page.locator("#cfgAccountPoolSummary")).to_contain_text("1 个自动分配候选")
+        self.expect(self.page.locator("#copyParamList")).to_contain_text("号池自动分配 · 1 个候选")
         self.expect(self.page.locator("#copyRuleForm [name=currency]")).to_have_count(0)
         self.expect(self.page.locator("#copyRuleForm")).to_contain_text("不做汇率换算")
         self.page.locator('[data-rule-mode="fixed"]').click()
@@ -599,10 +623,12 @@ class FollowBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#copyRuleFeedback")).to_have_text("规则已保存。")
         self.assertFalse(self.saves[-1]["enabled"])
         self.assertNotIn("currency", self.saves[-1])
+        self.assertNotIn("account_id", self.saves[-1])
         self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已暂停")
         self.page.locator("#copyEnableRule").click()
         self.expect(self.page.locator("#copyRuleFeedback")).to_have_text("规则已保存，跟单已启用。")
         self.assertTrue(self.saves[-1]["enabled"])
+        self.assertNotIn("account_id", self.saves[-1])
         self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已启用")
         self.page.locator("#copyPause").click()
         self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已暂停")

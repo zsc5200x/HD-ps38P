@@ -147,6 +147,29 @@ def timestamp(value, offset_minutes=-240):
     return stamp.timestamp()
 
 
+def mapped_game(mapping):
+    """Build the live-query identity from a confirmed Crown fixture snapshot."""
+    snapshot = mapping.get("crownSnapshot") or {}
+    lid = str(snapshot.get("providerLeagueId") or snapshot.get("leagueId") or "")
+    ecid = str(snapshot.get("ecid") or "")
+    home_id = str(snapshot.get("homeId") or "")
+    away_id = str(snapshot.get("awayId") or "")
+    home = str(snapshot.get("home") or "")
+    away = str(snapshot.get("away") or "")
+    crown_id = str(mapping.get("crownId") or "")
+    if not all((crown_id, lid, ecid, home_id, away_id, home, away)):
+        return None
+    return {
+        "gid": crown_id,
+        "lid": lid,
+        "ecid": ecid,
+        "team_h_id": home_id,
+        "team_c_id": away_id,
+        "team_h": home,
+        "team_c": away,
+    }
+
+
 def resolve_game(rows, mapping, intent, *, offset_minutes=-240):
     snapshot = mapping.get("crownSnapshot") or {}
     crown_id = str(mapping.get("crownId") or "")

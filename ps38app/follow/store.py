@@ -10,7 +10,16 @@ from pathlib import Path
 from .rules import DEFAULT_RULE
 from .source import number_text
 
-ACTIVE = {"WAIT_MAPPING", "GROUPING", "READY", "WAIT_MARKET", "PREPARED", "PREPARING", "RETRY_WAIT"}
+ACTIVE = {
+    "WAIT_MAPPING",
+    "WAIT_ACCOUNT",
+    "GROUPING",
+    "READY",
+    "WAIT_MARKET",
+    "PREPARED",
+    "PREPARING",
+    "RETRY_WAIT",
+}
 PROCESSING = ACTIVE | {"SUBMITTING"}
 FAILED = {"REJECTED", "SKIPPED", "EXPIRED"}
 STATES = PROCESSING | FAILED | {"SUCCEEDED", "UNKNOWN"}
@@ -148,7 +157,7 @@ class FollowStore:
         updated = {**group, "_revision": revision + 1}
         changed = connection.execute(
             "INSERT INTO follow_groups VALUES (?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET base_key=excluded.base_key,status=excluded.status,receipt_id=excluded.receipt_id,payload=excluded.payload "
+            "ON CONFLICT(id) DO UPDATE SET base_key=excluded.base_key,status=excluded.status,account_id=excluded.account_id,receipt_id=excluded.receipt_id,payload=excluded.payload "
             "WHERE COALESCE(json_extract(follow_groups.payload,'$._revision'),0)=?",
             (
                 group["id"],
@@ -409,7 +418,7 @@ class FollowStore:
             ).fetchall()
             active_tasks = connection.execute("SELECT COUNT(*) FROM follow_claims").fetchone()[0]
             queued_tasks = connection.execute(
-                "SELECT COUNT(*) FROM follow_groups g WHERE status IN ('READY','WAIT_MARKET','RETRY_WAIT') "
+                "SELECT COUNT(*) FROM follow_groups g WHERE status IN ('READY','WAIT_ACCOUNT','WAIT_MARKET','RETRY_WAIT') "
                 "AND NOT EXISTS (SELECT 1 FROM follow_claims c WHERE c.group_id=g.id)"
             ).fetchone()[0]
         summary = {

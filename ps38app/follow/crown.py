@@ -24,6 +24,7 @@ from .crown_markets import (
     FollowPreparationError,
     decimal,
     game_rows,
+    mapped_game,
     parse_receipt,
     resolve_game,
     scalar_fields,
@@ -44,6 +45,7 @@ class CrownAdapter:
         clock=None,
         monotonic=None,
         should_stop=None,
+        account_provider=None,
     ):
         self.config = config
         self._transport = transport
@@ -51,6 +53,7 @@ class CrownAdapter:
         self._clock = clock or time.time
         self._monotonic = monotonic or time.monotonic
         self._should_stop = should_stop or (lambda: False)
+        self._account_provider = account_provider
         self._prepared = {}
         self._lock = threading.Lock()
 
@@ -109,6 +112,37 @@ class CrownAdapter:
             raise ValueError("币种必须为三位大写代码")
         session = self._loader(account_id)
         return {"id": account_id, "name": session.get("name", account_id)}
+
+    def available_accounts(self):
+        """Return enabled, online Crown accounts whose project-owned sessions load locally."""
+        if self._account_provider is not None:
+            try:
+                values = self._account_provider()
+            except Exception:
+                return []
+            candidates = values if isinstance(values, (list, tuple)) else []
+            return list(
+                dict.fromkeys(str(value).strip() for value in candidates if str(value).strip())
+            )
+        try:
+            database = Path(self.config["pool_db_path"])
+            with closing(
+                sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
+            ) as connection:
+                rows = connection.execute(
+                    "SELECT id FROM accounts WHERE platform='crown_member' AND enabled=1 "
+                    "AND status='online' ORDER BY created_at,id"
+                ).fetchall()
+        except (OSError, KeyError, sqlite3.Error):
+            return []
+        available = []
+        for (account_id,) in rows:
+            try:
+                self._loader(account_id)
+            except Exception:
+                continue
+            available.append(str(account_id))
+        return available
 
     def _new_opener(self, session):
         """一次处理复用内存 CookieJar，承接只读确认返回的会话更新。"""
@@ -220,6 +254,35 @@ class CrownAdapter:
             json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    def _resolve_live_game(self, session, opener, deadline, mapping, intent):
+        now_ms = str(int(self._clock() * 1000))
+        rows = game_rows(
+            self._post(
+                session,
+                {
+                    "p": "get_game_list",
+                    "gtype": "ft",
+                    "showtype": "live",
+                    "rtype": "rb",
+                    "ltype": "3",
+                    "filter": "FT",
+                    "cupFantasy": "N",
+                    "sorttype": "L",
+                    "isFantasy": "N",
+                    "ts": now_ms,
+                    "chgSortTS": now_ms,
+                },
+                opener,
+                deadline=deadline,
+            )
+        )
+        return resolve_game(
+            rows,
+            mapping,
+            intent,
+            offset_minutes=int(self.config.get("crown_utc_offset_minutes", -240)),
+        )
+
     def prepare(self, mapping, intent, account_id):
         if intent.get("is_live") is not True:
             raise FollowPreparationError("首版仅支持滚球足球盘口", "UNSUPPORTED")
@@ -252,33 +315,11 @@ class CrownAdapter:
             currency = "CNY" if currency == "RMB" else currency
             if not re.fullmatch(r"[A-Z]{3}", currency):
                 raise ValueError("皇冠未返回明确账号币种")
-            now_ms = str(int(self._clock() * 1000))
-            rows = game_rows(
-                self._post(
-                    session,
-                    {
-                        "p": "get_game_list",
-                        "gtype": "ft",
-                        "showtype": "live",
-                        "rtype": "rb",
-                        "ltype": "3",
-                        "filter": "FT",
-                        "cupFantasy": "N",
-                        "sorttype": "L",
-                        "isFantasy": "N",
-                        "ts": now_ms,
-                        "chgSortTS": now_ms,
-                    },
-                    opener,
-                    deadline=deadline,
-                )
-            )
-            game = resolve_game(
-                rows,
-                mapping,
-                intent,
-                offset_minutes=int(self.config.get("crown_utc_offset_minutes", -240)),
-            )
+            game = mapped_game(mapping)
+            direct_lookup = game is not None
+            if not direct_lookup:
+                # Older confirmed mappings may not have ECID/team IDs yet.
+                game = self._resolve_live_game(session, opener, deadline, mapping, intent)
             boards = game_rows(
                 self._post(
                     session,
@@ -299,6 +340,15 @@ class CrownAdapter:
                     deadline=deadline,
                 )
             )
+            if direct_lookup and not all("score_h" in row and "score_c" in row for row in boards):
+                # 扩展盘口缺少完整比分时，保留原有的当前比分核验。
+                live_game = self._resolve_live_game(session, opener, deadline, mapping, intent)
+                if live_game.get("ecid") != game.get("ecid"):
+                    raise FollowPreparationError(
+                        "已合并赛事身份已变化，请刷新赛事映射",
+                        "IDENTITY_CONFLICT",
+                    )
+                game = live_game
             quote = select_market(boards, game, intent)
             quote = verify_context(
                 self._post(

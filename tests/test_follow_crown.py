@@ -18,6 +18,7 @@ from ps38app.follow.crown import CrownAdapter
 from ps38app.follow.crown_markets import (
     encode_line,
     game_rows,
+    mapped_game,
     parse_receipt,
     resolve_game,
     select_market,
@@ -60,6 +61,7 @@ MAPPING = {
     "crownId": "match-1",
     "crownSnapshot": {
         "providerLeagueId": "league-1",
+        "ecid": "event-1",
         "homeId": "team-1",
         "awayId": "team-2",
         "home": "本地主队",
@@ -199,6 +201,25 @@ class MarketParsingTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 resolve_game(rows, MAPPING, INTENT)
 
+    def test_confirmed_snapshot_can_locate_fixture_without_live_game_list(self):
+        self.assertEqual(
+            mapped_game(MAPPING),
+            {
+                "gid": "match-1",
+                "lid": "league-1",
+                "ecid": "event-1",
+                "team_h_id": "team-1",
+                "team_c_id": "team-2",
+                "team_h": "本地主队",
+                "team_c": "本地客队",
+            },
+        )
+        legacy = {
+            **MAPPING,
+            "crownSnapshot": {k: v for k, v in MAPPING["crownSnapshot"].items() if k != "ecid"},
+        }
+        self.assertIsNone(mapped_game(legacy))
+
     def test_context_rebinds_to_current_member_quote_and_validates_structure(self):
         quote = select_market([BOARD], GAME, INTENT)
         context = {
@@ -305,14 +326,88 @@ class AdapterTests(unittest.TestCase):
         quote = self.prepare()
         self.assertEqual(
             [item["p"] for item in self.calls],
-            ["get_member_data", "get_game_list", "get_game_more", "FT_order_view"],
+            ["get_member_data", "get_game_more", "FT_order_view"],
         )
+        market_query = next(item for item in self.calls if item["p"] == "get_game_more")
+        self.assertEqual((market_query["lid"], market_query["ecid"]), ("league-1", "event-1"))
         self.assertEqual(
             (quote["account_id"], quote["currency"], quote["odds"]), ("test-account", "CNY", "0.89")
         )
         public = json.dumps(quote)
         for private in ("fixture-uid", "fixture-ver", "fixture=cookie", "https://example.test"):
             self.assertNotIn(private, public)
+
+    def test_prepare_falls_back_to_live_game_list_for_legacy_mapping(self):
+        legacy = {
+            **MAPPING,
+            "crownSnapshot": {k: v for k, v in MAPPING["crownSnapshot"].items() if k != "ecid"},
+        }
+        self.adapter.prepare(legacy, INTENT, "test-account")
+        self.assertEqual(
+            [item["p"] for item in self.calls],
+            ["get_member_data", "get_game_list", "get_game_more", "FT_order_view"],
+        )
+
+    def test_direct_lookup_returns_over_one_one_half_market_gid_and_odds(self):
+        intent = {
+            **INTENT,
+            "market_type": "TOTAL",
+            "side": "OVER",
+            "line": "1.25",
+        }
+
+        def transport(url, fields, headers, timeout):
+            if fields["p"] == "get_game_more":
+                self.calls.append(dict(fields))
+                board = {**BOARD, "ratio_rouo": "1/1.5", "ior_rouc": "0.93"}
+                return 200, games_xml([board])
+            if fields["p"] == "FT_order_view":
+                self.calls.append(dict(fields))
+                return 200, response(
+                    {
+                        "code": "501",
+                        "fast_check": "ROUC",
+                        "con": "1",
+                        "ratio": "-50",
+                        "ioratio": "0.93",
+                    }
+                )
+            return self.transport(url, fields, headers, timeout)
+
+        self.adapter._transport = transport
+        quote = self.adapter.prepare(MAPPING, intent, "test-account")
+        self.assertEqual(
+            (quote["master_gid"], quote["gid"], quote["line"], quote["odds"]),
+            ("match-1", "line-1", "1.25", "0.93"),
+        )
+        self.assertEqual(
+            [item["p"] for item in self.calls],
+            ["get_member_data", "get_game_more", "FT_order_view"],
+        )
+        self.assertEqual(self.calls[-1]["chose_team"], "C")
+
+    def test_direct_lookup_checks_live_score_if_market_response_omits_it(self):
+        no_score_board = {
+            key: value for key, value in BOARD.items() if key not in {"score_h", "score_c"}
+        }
+
+        def transport(url, fields, headers, timeout):
+            self.calls.append(dict(fields))
+            if fields["p"] == "get_member_data":
+                return 200, response({"enable": "Y", "currency": "CNY"})
+            if fields["p"] == "get_game_more":
+                return 200, games_xml([no_score_board])
+            if fields["p"] == "get_game_list":
+                return 200, games_xml([{**GAME, "score_h": "1"}])
+            return self.transport(url, fields, headers, timeout)
+
+        self.adapter._transport = transport
+        with self.assertRaisesRegex(ValueError, "比分"):
+            self.adapter.prepare(MAPPING, INTENT, "test-account")
+        self.assertEqual(
+            [item["p"] for item in self.calls],
+            ["get_member_data", "get_game_more", "get_game_list"],
+        )
 
     def test_success_uses_line_gid_and_quote_can_only_be_consumed_once(self):
         quote = self.prepare()
@@ -397,7 +492,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(timeouts, [5, 5, 2])
         self.assertEqual(
             [item["p"] for item in self.calls],
-            ["get_member_data", "get_game_list", "get_game_more"],
+            ["get_member_data", "get_game_more", "FT_order_view"],
         )
 
     def test_stop_during_prepare_prevents_further_requests(self):
@@ -542,7 +637,9 @@ class AdapterTests(unittest.TestCase):
             store.set_status(account_id, "online", "测试在线")
             adapter = CrownAdapter(config)
             self.assertEqual(adapter.validate_account(account_id, "CNY")["id"], account_id)
+            self.assertEqual(adapter.available_accounts(), [account_id])
             store.set_status(account_id, "expired", "测试失效")
+            self.assertEqual(adapter.available_accounts(), [])
             with self.assertRaises(ValueError):
                 adapter.validate_account(account_id, "CNY")
 

@@ -30,6 +30,7 @@ class Clock:
 class Executor:
     def __init__(self, clock):
         self.clock = clock
+        self.account_ids = ["crown-test"]
         self.prepared = []
         self.submitted = []
         self.result = None
@@ -39,6 +40,9 @@ class Executor:
     def validate_account(self, account_id, currency):
         if account_id != "crown-test" or currency != "CNY":
             raise ValueError("测试账号不匹配")
+
+    def available_accounts(self):
+        return list(self.account_ids)
 
     def prepare(self, mapping, intent, account_id):
         self.prepared.append(copy.deepcopy(intent))
@@ -168,8 +172,10 @@ class RuleTests(unittest.TestCase):
                 source_intent(parse_order(raw_order(currencyCode=currency), "A"))
 
     def test_rule_no_longer_requires_currency_and_keeps_cny_compatibility(self):
-        payload = {"enabled": True, "account_id": "crown-test", "amount_value": "100"}
+        payload = {"enabled": True, "amount_value": "100"}
         self.assertEqual(validate_rule(payload)["currency"], "CNY")
+        legacy = validate_rule({**payload, "account_id": "old-fixed-account"})
+        self.assertNotIn("account_id", legacy)
         for currency in ("", "THB", "RMB", "USD"):
             with self.subTest(currency=currency):
                 self.assertEqual(
@@ -239,7 +245,6 @@ class FollowServiceTests(unittest.TestCase):
         return self.service.save_rule(
             {
                 "enabled": True,
-                "account_id": "crown-test",
                 "currency": "CNY",
                 "amount_mode": "fixed",
                 "amount_value": "50",
@@ -268,6 +273,33 @@ class FollowServiceTests(unittest.TestCase):
         self.add("2")
         self.tick()
         self.assertEqual(self.groups()[0]["status"], "GROUPING")
+
+    def test_groups_rotate_across_healthy_crown_members(self):
+        self.executor.account_ids = ["crown-a", "crown-b"]
+        self.enable()
+        self.add("one")
+        self.tick(21)
+        self.add("two")
+        self.tick(21)
+        self.assertEqual([item[2] for item in self.executor.submitted], ["crown-a", "crown-b"])
+        self.assertNotIn("account_id", self.service.snapshot("ALL")["rule"])
+        self.assertEqual([group["account_id"] for group in self.groups()], ["crown-b", "crown-a"])
+
+    def test_group_waits_for_available_pool_member_then_resumes(self):
+        self.enable()
+        self.add()
+        self.executor.account_ids = []
+        self.tick(21)
+        self.assertEqual(self.groups()[0]["status"], "WAIT_ACCOUNT")
+        self.assertEqual(self.executor.submitted, [])
+        self.executor.account_ids = ["crown-test"]
+        self.tick(2)
+        self.assertEqual(self.groups()[0]["status"], "SUCCEEDED")
+
+    def test_enabling_requires_one_eligible_pool_member(self):
+        self.executor.account_ids = []
+        with self.assertRaisesRegex(ValueError, "在线且会话有效"):
+            self.enable()
 
     def test_group_three_orders_ratio_reverse_and_real_receipt(self):
         self.enable(amount_mode="ratio", amount_value="10", direction="reverse")

@@ -137,6 +137,8 @@
 .cfg-body.cfg-rows { gap: 8px; }
 
 .cfg-field { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.copy-auto-assignment { justify-content: center; min-height: 72px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-elevated); }
+.copy-auto-assignment strong { color: var(--text); font-size: .78rem; font-weight: 600; }
 
 .cfg-label {
   display: flex;

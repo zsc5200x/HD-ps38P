@@ -79,6 +79,10 @@ class BoundedDispatcher:
         with self._lock:
             return len(self._active)
 
+    def active_accounts(self):
+        with self._lock:
+            return set(self._accounts)
+
     def available_slots(self):
         with self._lock:
             return max(0, self.max_workers - len(self._active))

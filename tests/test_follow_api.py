@@ -22,6 +22,9 @@ class FakeFollow:
         self.calls.append(kwargs)
         return {"ok": True, "rows": [], "total": 0, "rule": {"enabled": False}}
 
+    def available_account_ids(self):
+        return ["crown-test"]
+
     def save_rule(self, body):
         if body.get("amount_value") == "bad":
             raise ValueError("金额必须是有效数字")
@@ -111,6 +114,7 @@ class FollowApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.follow.calls[-1]["status"], "SUCCEEDED")
         self.assertEqual([a["id"] for a in payload["accounts"]], ["crown-test"])
+        self.assertTrue(payload["accounts"][0]["follow_eligible"])
         self.assertNotIn("must-not-leak", json.dumps(payload))
 
     def test_search_and_pagination_are_passed_to_service(self):
