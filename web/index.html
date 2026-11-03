@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0a0f19">
   <link rel="icon" type="image/svg+xml" href="static/logo.svg?v=1">
   <title>HD PS38 Sports</title>
-  <link rel="stylesheet" href="static/styles.css?v=20261103-24">
+  <link rel="stylesheet" href="static/styles.css?v=20261103-25">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -72,8 +72,8 @@
           <button id="myEventsLogin" class="button primary" type="button" title="把代理后台浏览器窗口弹到前台；已登录时直接切换，不会退出登录">登录后台</button>
         </div>
         <div class="page-action-group" data-page-actions="copy" hidden>
-          <a class="button ghost" href="#/home" data-nav-action="home">返回我的赛事</a>
-          <button class="button ghost" type="button" data-nav-action="open-login">登录后台</button>
+          <button id="copyRulesToggle" class="button ghost" type="button" aria-controls="copyRuleSettings" aria-expanded="false">跟单规则</button>
+          <button id="copyRefresh" class="button ghost" type="button">刷新记录</button>
         </div>
         <div class="page-action-group" data-page-actions="merge" hidden>
           <button id="mergeAuto" class="button primary" type="button" disabled>自动合并</button>
@@ -234,35 +234,77 @@
 
     </section>
 
-    <section id="copyPage" class="page-view shell-page" data-page-panel="copy" aria-label="PS38 跟单" hidden>
-      <div class="page-shell-body module-body">
-          <div class="module-grid">
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">01 / SIGNAL</span>
-                <span class="module-card-state">未接入</span>
-              </div>
-              <h2>跟单信号</h2>
-              <p>信号源、推送通道与派单规则来自 HD 主系统，独立版没有对应接口。</p>
-            </article>
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">02 / RISK</span>
-                <span class="module-card-state">未接入</span>
-              </div>
-              <h2>风险与限额</h2>
-              <p>下单前的限额、赔付与风控策略不在本版本内，避免误触真实投注。</p>
-            </article>
-            <article class="module-card">
-              <div class="module-card-top">
-                <span class="module-card-index">03 / RECEIPT</span>
-                <span class="module-card-state readonly">只读</span>
-              </div>
-              <h2>订单回执</h2>
-              <p>本地只有只读订单库；所有数据都来自后台报表，不产生写单动作。</p>
-            </article>
+    <section id="copyPage" class="page-view shell-page copy-page" data-page-panel="copy" aria-label="PS38 跟单" hidden>
+      <div class="page-shell-body copy-body">
+        <div class="copy-servicebar">
+          <div class="copy-service-main">
+            <span id="copyServiceBadge" class="copy-badge">读取中</span>
+            <span id="copyServiceMessage">正在读取跟单状态…</span>
           </div>
+          <span class="copy-scope">滚球足球 · 全场 / 上半场 · 让球 / 大小</span>
         </div>
+        <div class="copy-overview" aria-label="跟单统计">
+          <article class="copy-stat copy-stat-success"><span>跟单成功</span><strong id="copySuccessCount">—</strong><small>已取得明确成功回执</small></article>
+          <article class="copy-stat"><span>处理中</span><strong id="copyProcessingCount">—</strong><small>合组、匹配或等待盘口</small></article>
+          <article class="copy-stat"><span>未完成</span><strong id="copyFailedCount">—</strong><small>失败、已跳过或已过期</small></article>
+          <article class="copy-stat copy-stat-unknown"><span>待核对</span><strong id="copyUnknownCount">—</strong><small>结果不明，停止重复提交</small></article>
+        </div>
+
+        <details id="copyRuleSettings" class="copy-rule-panel">
+          <summary><span><strong>跟单规则</strong><span id="copyRuleSummary">设置方向、金额和皇冠账号</span></span><span id="copyRuleDirty" class="copy-rule-dirty" hidden>有未保存修改</span></summary>
+          <form id="copyRuleForm" class="copy-rule-form">
+            <p class="copy-form-intro">同条件原单在 20 秒内合成一组，窗口结束后按本规则处理。金额统一按人民币计算；后台显示 THB 的原单也按原数字计入，不做汇率换算。启用后只接收新来单。</p>
+            <div class="copy-fields">
+              <label for="copyDirection">跟单方向<select id="copyDirection" name="direction"><option value="forward">正向跟单</option><option value="reverse">反向跟单</option></select></label>
+              <label for="copyAmountMode">金额方式<select id="copyAmountMode" name="amount_mode"><option value="fixed">每组固定金额</option><option value="ratio">原单合计金额比例</option></select></label>
+              <label for="copyAmountValue"><span id="copyAmountLabel">每组金额</span><input id="copyAmountValue" name="amount_value" type="number" min="0.01" step="0.01" required inputmode="decimal" aria-describedby="copyAmountHelp"><small id="copyAmountHelp">每组仅计算一次固定金额。</small></label>
+              <label for="copyAccount">皇冠账号<select id="copyAccount" name="account_id" required><option value="">请选择皇冠账号</option></select><small>账号会话由号池管理。</small></label>
+              <label for="copyMaxAge">最长原单年龄（秒）<input id="copyMaxAge" name="max_age_seconds" type="number" min="21" max="600" step="1" value="120" required inputmode="numeric"><small>21–600 秒，包含合组和等待盘口的时间。</small></label>
+              <label for="copyMinOdds">最低水位（香港盘）<input id="copyMinOdds" name="min_odds" type="number" step="0.001" min="0.001" placeholder="不限制" inputmode="decimal"></label>
+              <label for="copyMaxOdds">最高水位（香港盘）<input id="copyMaxOdds" name="max_odds" type="number" step="0.001" min="0.001" placeholder="不限制" inputmode="decimal"></label>
+              <label for="copyMembers" class="copy-field-wide">来源会员<input id="copyMembers" name="member_codes" type="text" placeholder="留空接收全部会员；多个会员用逗号分隔" autocomplete="off"></label>
+            </div>
+            <p id="copyFormError" class="copy-alert copy-alert-error" role="alert" tabindex="-1" hidden></p>
+            <div class="copy-rule-actions">
+              <span id="copyRuleFeedback" class="copy-form-feedback" role="status"></span>
+              <button id="copyPause" class="button ghost" type="button" disabled>暂停跟单</button>
+              <button id="copySaveRule" class="button ghost" type="submit" value="save" disabled>保存规则</button>
+              <button id="copyEnableRule" class="button primary" type="submit" value="enable" disabled>保存并启用</button>
+            </div>
+          </form>
+        </details>
+
+        <section class="copy-records" aria-labelledby="copyRecordsTitle">
+          <header class="copy-records-head">
+            <div><h2 id="copyRecordsTitle">跟单记录</h2><span id="copyRecordsHint">展示已收到成功回执的真实跟单订单。</span></div>
+            <label class="copy-search" for="copySearch"><span class="sr-only">搜索跟单记录</span><input id="copySearch" type="search" placeholder="搜索球队、订单号或会员" autocomplete="off"></label>
+          </header>
+          <div class="copy-filters" role="group" aria-label="筛选跟单状态">
+            <button type="button" data-copy-filter="SUCCEEDED" aria-pressed="true">已成功 <span data-copy-count="succeeded">0</span></button>
+            <button type="button" data-copy-filter="PROCESSING" aria-pressed="false">处理中 <span data-copy-count="processing">0</span></button>
+            <button type="button" data-copy-filter="FAILED" aria-pressed="false">未完成 <span data-copy-count="failed">0</span></button>
+            <button type="button" data-copy-filter="UNKNOWN" aria-pressed="false">待核对 <span data-copy-count="unknown">0</span></button>
+            <button type="button" data-copy-filter="ALL" aria-pressed="false">全部 <span data-copy-count="total">0</span></button>
+          </div>
+          <div id="copyLoadError" class="copy-alert copy-alert-error" role="alert" hidden></div>
+          <div class="copy-table-wrap" role="region" aria-label="跟单订单列表" tabindex="0">
+            <table class="copy-table">
+              <thead><tr><th scope="col">状态 / 回执号</th><th scope="col">皇冠比赛</th><th scope="col">跟单盘口</th><th scope="col" class="copy-number">水位</th><th scope="col" class="copy-number">金额</th><th scope="col">账号 / 来源</th><th scope="col">时间</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+              <tbody id="copyRows"></tbody>
+            </table>
+          </div>
+          <div id="copyEmpty" class="copy-empty" hidden>
+            <span class="copy-empty-icon" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h10a2 2 0 0 1 2 2v16l-3-2-4 2-4-2-3 2V5a2 2 0 0 1 2-2Z"/><path d="m8 10 2.5 2.5L16 7M8 16h8"/></svg></span>
+            <h3 id="copyEmptyTitle">暂无成功跟单</h3><p id="copyEmptyText">收到皇冠明确成功回执后，订单会显示在这里。</p>
+            <button id="copyEmptyAll" class="button ghost" type="button">查看全部记录</button>
+          </div>
+          <footer class="copy-records-foot"><span id="copyRecordCount" role="status" aria-live="polite">正在加载…</span><div><span id="copyUpdatedAt">自动刷新 · 每 3 秒</span><button id="copyPrevious" class="button ghost" type="button" hidden>上一页</button><button id="copyMore" class="button ghost" type="button" hidden>下一页</button></div></footer>
+        </section>
+      </div>
+      <dialog id="copyDetailDialog" class="copy-dialog" aria-labelledby="copyDetailTitle">
+        <header class="copy-dialog-head"><div><span class="copy-kicker">跟单明细</span><h2 id="copyDetailTitle">订单详情</h2></div><button id="copyDetailClose" class="button ghost" type="button" aria-label="关闭跟单明细">关闭</button></header>
+        <div id="copyDetailContent" class="copy-detail-content"></div>
+      </dialog>
     </section>
 
     <section id="mergePage" class="page-view shell-page" data-page-panel="merge" aria-label="赛事合并" hidden>
@@ -495,6 +537,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="static/app.js?v=20261103-24"></script>
+  <script type="module" src="static/app.js?v=20261103-25"></script>
 </body>
 </html>

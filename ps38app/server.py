@@ -118,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if decoded.startswith("/static/"):
-            relative = decoded[len("/static/"):]
+            relative = decoded[len("/static/") :]
         else:
             relative = decoded.lstrip("/") or "index.html"
         candidate = (WEB_DIR / relative).resolve()
@@ -167,17 +167,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._my_events_events(query)
             elif parsed.path == "/api/merge":
                 self._merge()
+            elif parsed.path == "/api/follow":
+                self._follow_status(query)
+            elif parsed.path.startswith("/api/follow/groups/"):
+                self._follow_detail(unquote(parsed.path[len("/api/follow/groups/") :]))
             elif parsed.path == "/api/pool":
                 self._pool_status()
             elif parsed.path == "/api/status":
                 self._status()
             elif parsed.path == "/api/health":
-                self.send_json({
-                    "ok": True,
-                    "version": VERSION,
-                    "serverTime": now_iso(),
-                    "session": self.server.poller.snapshot()["status"],
-                })
+                self.send_json(
+                    {
+                        "ok": True,
+                        "version": VERSION,
+                        "serverTime": now_iso(),
+                        "session": self.server.poller.snapshot()["status"],
+                    }
+                )
             else:
                 self.serve_static(parsed.path)
         except BrokenPipeError:
@@ -240,7 +246,111 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/pool/"):
             self._pool_action(parsed.path)
             return
+        if parsed.path.startswith("/api/follow/"):
+            self._follow_action(parsed.path)
+            return
         self.send_json({"ok": False, "error": "接口不存在"}, status=404)
+
+    # ── follow groups and confirmed receipts ──────────────────────────────
+
+    def _follow_service(self):
+        service = getattr(self.server, "follow_service", None)
+        if service is None:
+            self.send_json({"ok": False, "error": "跟单服务暂不可用，请检查启动状态"}, status=503)
+        return service
+
+    def _follow_accounts(self):
+        pool = getattr(self.server, "pool", None)
+        if pool is None:
+            return []
+        accounts = pool.snapshot().get("accounts", [])
+        return [
+            {
+                **{
+                    key: account.get(key)
+                    for key in ("id", "username", "status", "enabled", "platform")
+                },
+                "label": account.get("name") or account.get("label") or account.get("username"),
+            }
+            for account in accounts
+            if account.get("platform") == "crown_member"
+        ]
+
+    def _follow_status(self, query) -> None:
+        service = self._follow_service()
+        if service is None:
+            return
+        try:
+            status = (query.get("status") or ["SUCCEEDED"])[0].upper()
+            if status not in {"SUCCEEDED", "ALL", "PROCESSING", "FAILED", "UNKNOWN"}:
+                raise ValueError("跟单状态筛选无效")
+            limit, offset = self._limit_offset(query)
+            payload = service.snapshot(
+                status=status,
+                search=(query.get("search") or [""])[0][:200],
+                limit=limit,
+                offset=offset,
+            )
+            try:
+                payload["accounts"] = self._follow_accounts()
+            except Exception:
+                payload["accounts"] = []
+                payload["account_warning"] = "账号列表暂不可用，请在号池检查账号"
+            self.send_json(payload)
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception:
+            self.send_json({"ok": False, "error": "跟单记录读取失败，请稍后重试"}, status=500)
+
+    def _follow_detail(self, group_id: str) -> None:
+        service = self._follow_service()
+        if service is None:
+            return
+        try:
+            if not group_id or len(group_id) > 128 or "/" in group_id:
+                raise ValueError("跟单组编号无效")
+            self.send_json(service.detail(group_id))
+        except KeyError:
+            self.send_json({"ok": False, "error": "跟单记录不存在"}, status=404)
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception:
+            self.send_json({"ok": False, "error": "跟单明细读取失败，请稍后重试"}, status=500)
+
+    def _follow_action(self, path: str) -> None:
+        service = self._follow_service()
+        if service is None:
+            return
+        try:
+            if path == "/api/follow/rule":
+                body = self.read_json_body()
+                if not body:
+                    raise ValueError("请填写跟单规则")
+                rule = service.save_rule(body)
+                self.send_json({"ok": True, "rule": rule, "message": "跟单规则已保存"})
+            elif path == "/api/follow/pause":
+                service.pause()
+                self.send_json({"ok": True, "message": "跟单已暂停，在途结果将继续记录"})
+            elif path.startswith("/api/follow/groups/"):
+                parts = path.split("/")
+                if len(parts) != 6 or parts[5] not in {"reconcile", "resolution"}:
+                    self.send_json({"ok": False, "error": "接口不存在"}, status=404)
+                    return
+                group_id = unquote(parts[4])
+                if not group_id or len(group_id) > 128 or "/" in group_id:
+                    raise ValueError("跟单组编号无效")
+                if parts[5] == "reconcile":
+                    self.send_json(service.request_reconcile(group_id))
+                else:
+                    self.send_json(service.resolve_unknown(group_id, self.read_json_body()))
+            else:
+                self.send_json({"ok": False, "error": "接口不存在"}, status=404)
+        except KeyError:
+            self.send_json({"ok": False, "error": "跟单记录不存在"}, status=404)
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception:
+            self.send_json({"ok": False, "error": "跟单规则操作失败，请稍后重试"}, status=500)
 
     # ── account pool ──────────────────────────────────────────────────────
 
@@ -276,8 +386,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._pool_body()
             if path == "/api/pool/save":
                 account = pool.save_account(body, body.get("id") or None)
-                self.send_json({"ok": True, "account": account,
-                                "message": "账号已保存"})
+                self.send_json({"ok": True, "account": account, "message": "账号已保存"})
             elif path == "/api/pool/login":
                 account_id = str(body.get("id") or "")
                 if not account_id:
@@ -296,8 +405,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/pool/clear":
                 account_id = str(body.get("id") or "")
                 account = pool.clear_session(account_id)
-                self.send_json({"ok": True, "account": account,
-                                "message": "已清除会话"})
+                self.send_json({"ok": True, "account": account, "message": "已清除会话"})
             elif path == "/api/pool/delete":
                 account_id = str(body.get("id") or "")
                 pool.delete_account(account_id)
@@ -305,8 +413,13 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/pool/toggle":
                 account_id = str(body.get("id") or "")
                 account = pool.toggle(account_id, bool(body.get("enabled")))
-                self.send_json({"ok": True, "account": account,
-                                "message": "账号已启用" if account["enabled"] else "账号已停用"})
+                self.send_json(
+                    {
+                        "ok": True,
+                        "account": account,
+                        "message": "账号已启用" if account["enabled"] else "账号已停用",
+                    }
+                )
             elif path == "/api/pool/cancel":
                 account_id = str(body.get("id") or "")
                 result = pool.cancel(account_id)
@@ -319,7 +432,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
-            if message.startswith(("该账号", "账号已", "采集器", "请选择", "请填写", "已有账号", "登录")):
+            if message.startswith(
+                ("该账号", "账号已", "采集器", "请选择", "请填写", "已有账号", "登录")
+            ):
                 self.send_json({"ok": False, "error": message}, status=400)
             else:
                 self.send_json({"ok": False, "error": f"账号池操作失败：{message}"}, status=500)
@@ -348,12 +463,22 @@ class Handler(BaseHTTPRequestHandler):
         hours_window = _hours_bounds(query)
         if hours_window:
             from_ms, to_ms = hours_window
-            from_utc = datetime.fromtimestamp(from_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            to_utc = datetime.fromtimestamp(to_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            from_utc = datetime.fromtimestamp(from_ms / 1000, timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            to_utc = datetime.fromtimestamp(to_ms / 1000, timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
         return {
-            "status": status, "agent": agent, "search": search, "basis": basis,
-            "tz": tz_minutes, "from_ms": from_ms, "to_ms": to_ms,
-            "from_utc": from_utc, "to_utc": to_utc,
+            "status": status,
+            "agent": agent,
+            "search": search,
+            "basis": basis,
+            "tz": tz_minutes,
+            "from_ms": from_ms,
+            "to_ms": to_ms,
+            "from_utc": from_utc,
+            "to_utc": to_utc,
         }
 
     def _limit_offset(self, query) -> tuple[int, int]:
@@ -363,9 +488,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _agents(self, connection) -> list:
         try:
-            return [dict(row) for row in connection.execute(
-                "SELECT code, level, name FROM partner_agents ORDER BY code"
-            )]
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT code, level, name FROM partner_agents ORDER BY code"
+                )
+            ]
         except sqlite3.Error:
             return []
 
@@ -378,15 +506,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         connection = self._connection()
         if connection is None:
-            self.send_json({"ok": True, "ready": False, "total": 0, "rows": [],
-                            "agents": [], "status": scope["status"]})
+            self.send_json(
+                {
+                    "ok": True,
+                    "ready": False,
+                    "total": 0,
+                    "rows": [],
+                    "agents": [],
+                    "status": scope["status"],
+                }
+            )
             return
         try:
             payload = order_store.query_orders(
-                connection, None if scope["status"] == "ALL" else scope["status"],
-                scope["agent"], scope["search"], limit, offset,
-                scope["from_ms"], scope["to_ms"], basis=scope["basis"],
-                from_utc=scope["from_utc"], to_utc=scope["to_utc"],
+                connection,
+                None if scope["status"] == "ALL" else scope["status"],
+                scope["agent"],
+                scope["search"],
+                limit,
+                offset,
+                scope["from_ms"],
+                scope["to_ms"],
+                basis=scope["basis"],
+                from_utc=scope["from_utc"],
+                to_utc=scope["to_utc"],
             )
             payload["agents"] = self._agents(connection)
         except sqlite3.Error as exc:
@@ -394,8 +537,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         finally:
             connection.close()
-        payload.update({"ok": True, "ready": True, "status": scope["status"],
-                        "basis": scope["basis"], "tz": scope["tz"]})
+        payload.update(
+            {
+                "ok": True,
+                "ready": True,
+                "status": scope["status"],
+                "basis": scope["basis"],
+                "tz": scope["tz"],
+            }
+        )
         self.send_json(payload)
 
     def _my_events_fixtures(self, query) -> None:
@@ -407,14 +557,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         connection = self._connection()
         if connection is None:
-            self.send_json({"ok": True, "ready": False, "total": 0, "rows": [],
-                            "status": scope["status"], "basis": scope["basis"], "tz": scope["tz"]})
+            self.send_json(
+                {
+                    "ok": True,
+                    "ready": False,
+                    "total": 0,
+                    "rows": [],
+                    "status": scope["status"],
+                    "basis": scope["basis"],
+                    "tz": scope["tz"],
+                }
+            )
             return
         try:
             payload = order_store.query_fixtures(
-                connection, scope["status"], scope["agent"], scope["search"],
-                limit, offset, scope["from_ms"], scope["to_ms"],
-                basis=scope["basis"], from_utc=scope["from_utc"], to_utc=scope["to_utc"],
+                connection,
+                scope["status"],
+                scope["agent"],
+                scope["search"],
+                limit,
+                offset,
+                scope["from_ms"],
+                scope["to_ms"],
+                basis=scope["basis"],
+                from_utc=scope["from_utc"],
+                to_utc=scope["to_utc"],
             )
             payload["agents"] = self._agents(connection)
         except sqlite3.Error as exc:
@@ -422,8 +589,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         finally:
             connection.close()
-        payload.update({"ok": True, "ready": True, "status": scope["status"],
-                        "basis": scope["basis"], "tz": scope["tz"]})
+        payload.update(
+            {
+                "ok": True,
+                "ready": True,
+                "status": scope["status"],
+                "basis": scope["basis"],
+                "tz": scope["tz"],
+            }
+        )
         self.send_json(payload)
 
     def _my_events_copy(self, query) -> None:
@@ -435,14 +609,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         connection = self._connection()
         if connection is None:
-            self.send_json({"ok": True, "ready": False, "total": 0, "rows": [],
-                            "status": scope["status"], "basis": scope["basis"], "tz": scope["tz"]})
+            self.send_json(
+                {
+                    "ok": True,
+                    "ready": False,
+                    "total": 0,
+                    "rows": [],
+                    "status": scope["status"],
+                    "basis": scope["basis"],
+                    "tz": scope["tz"],
+                }
+            )
             return
         try:
             payload = order_store.query_copy_groups(
-                connection, scope["status"], scope["agent"], scope["search"],
-                limit, offset, scope["from_ms"], scope["to_ms"],
-                basis=scope["basis"], from_utc=scope["from_utc"], to_utc=scope["to_utc"],
+                connection,
+                scope["status"],
+                scope["agent"],
+                scope["search"],
+                limit,
+                offset,
+                scope["from_ms"],
+                scope["to_ms"],
+                basis=scope["basis"],
+                from_utc=scope["from_utc"],
+                to_utc=scope["to_utc"],
             )
             payload["agents"] = self._agents(connection)
         except sqlite3.Error as exc:
@@ -450,8 +641,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         finally:
             connection.close()
-        payload.update({"ok": True, "ready": True, "status": scope["status"],
-                        "basis": scope["basis"], "tz": scope["tz"]})
+        payload.update(
+            {
+                "ok": True,
+                "ready": True,
+                "status": scope["status"],
+                "basis": scope["basis"],
+                "tz": scope["tz"],
+            }
+        )
         self.send_json(payload)
 
     def _my_events_fixture(self, query) -> None:
@@ -474,9 +672,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             payload = order_store.query_fixture_orders(
-                connection, teams, event_ms, scope["status"], scope["agent"],
-                scope["search"], 500, scope["from_ms"], scope["to_ms"],
-                basis=scope["basis"], from_utc=scope["from_utc"], to_utc=scope["to_utc"],
+                connection,
+                teams,
+                event_ms,
+                scope["status"],
+                scope["agent"],
+                scope["search"],
+                500,
+                scope["from_ms"],
+                scope["to_ms"],
+                basis=scope["basis"],
+                from_utc=scope["from_utc"],
+                to_utc=scope["to_utc"],
             )
         except sqlite3.Error as exc:
             self.send_json({"ok": False, "error": f"比赛订单读取失败：{exc}"}, status=500)
@@ -499,8 +706,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             payload = order_store.query_summary(
-                connection, scope["agent"], scope["from_ms"], scope["to_ms"],
-                basis=scope["basis"], from_utc=scope["from_utc"], to_utc=scope["to_utc"],
+                connection,
+                scope["agent"],
+                scope["from_ms"],
+                scope["to_ms"],
+                basis=scope["basis"],
+                from_utc=scope["from_utc"],
+                to_utc=scope["to_utc"],
             )
         except sqlite3.Error as exc:
             self.send_json({"ok": False, "error": f"订单汇总读取失败：{exc}"}, status=500)
@@ -542,10 +754,13 @@ class Handler(BaseHTTPRequestHandler):
     def _merge_service(self):
         service = getattr(self.server, "merge_service", None)
         if service is None:
-            self.send_json({
-                "ok": False,
-                "error": getattr(self.server, "merge_error", "") or "赛事合并服务未初始化。",
-            }, status=503)
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": getattr(self.server, "merge_error", "") or "赛事合并服务未初始化。",
+                },
+                status=503,
+            )
         return service
 
     def _merge(self) -> None:
@@ -590,15 +805,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._merge_error(exc)
             return
-        self.send_json({
-            "ok": True,
-            "source": source,
-            "count": result.get("count", 0),
-            "refreshed": result.get("refreshed"),
-            "autoBound": result.get("autoBound", 0),
-            "autoError": result.get("autoError"),
-            "message": message,
-        })
+        self.send_json(
+            {
+                "ok": True,
+                "source": source,
+                "count": result.get("count", 0),
+                "refreshed": result.get("refreshed"),
+                "autoBound": result.get("autoBound", 0),
+                "autoError": result.get("autoError"),
+                "message": message,
+            }
+        )
 
     def _merge_league_mapping(self) -> None:
         service = self._merge_service()
@@ -626,9 +843,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._merge_error(exc)
             return
-        self.send_json({"ok": True, "message": "联赛已绑定", "mapping": saved,
-                        "autoBound": saved.get("autoBound", 0),
-                        "autoError": saved.get("autoError")})
+        self.send_json(
+            {
+                "ok": True,
+                "message": "联赛已绑定",
+                "mapping": saved,
+                "autoBound": saved.get("autoBound", 0),
+                "autoError": saved.get("autoError"),
+            }
+        )
 
     def _merge_mapping(self) -> None:
         service = self._merge_service()
@@ -677,32 +900,34 @@ class Handler(BaseHTTPRequestHandler):
         connection = self._connection()
         if connection is not None:
             connection.close()
-        self.send_json({
-            "ok": True,
-            "version": VERSION,
-            "serverTime": now_iso(),
-            "uptimeSeconds": round(time.monotonic() - self.server.started_monotonic, 1),
-            "session": {
-                "status": state["status"],
-                "message": state["message"],
-                "since": state["since"],
-                "last_error": state["last_error"],
-                "profile": state["profile"],
-                "agents": state["agents"],
-                "last_open_at": state["last_open_at"],
-                "last_settled_at": state["last_settled_at"],
-                "last_cycle_seconds": state["last_cycle_seconds"],
-                "poll_count": state["poll_count"],
-                "new_orders": state["new_orders"],
-            },
-            "backfill": state["backfill"],
-            "counts": state["counts"],
-            "db": {
-                "path": str(self.server.config["db_path"]),
-                "ready": connection is not None or Path(self.server.config["db_path"]).exists(),
-            },
-            "config": public_config(self.server.config),
-        })
+        self.send_json(
+            {
+                "ok": True,
+                "version": VERSION,
+                "serverTime": now_iso(),
+                "uptimeSeconds": round(time.monotonic() - self.server.started_monotonic, 1),
+                "session": {
+                    "status": state["status"],
+                    "message": state["message"],
+                    "since": state["since"],
+                    "last_error": state["last_error"],
+                    "profile": state["profile"],
+                    "agents": state["agents"],
+                    "last_open_at": state["last_open_at"],
+                    "last_settled_at": state["last_settled_at"],
+                    "last_cycle_seconds": state["last_cycle_seconds"],
+                    "poll_count": state["poll_count"],
+                    "new_orders": state["new_orders"],
+                },
+                "backfill": state["backfill"],
+                "counts": state["counts"],
+                "db": {
+                    "path": str(self.server.config["db_path"]),
+                    "ready": connection is not None or Path(self.server.config["db_path"]).exists(),
+                },
+                "config": public_config(self.server.config),
+            }
+        )
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -715,12 +940,27 @@ class DashboardServer(ThreadingHTTPServer):
         self.pool = pool
         self.started_monotonic = time.monotonic()
         self.merge_error = ""
+        self.merge_service = None
+        self.follow_service = None
+        self.follow_error = ""
+        # 端口占用时先退出，避免第二次启动触发在途跟单恢复。
+        super().__init__(address, Handler)
         try:
             self.merge_service = MergeService(config)
         except Exception as exc:  # noqa: BLE001 - keep the order dashboard usable
             self.merge_service = None
             self.merge_error = f"赛事合并存储初始化失败：{exc}"
-        super().__init__(address, Handler)
+        try:
+            from .follow.service import FollowService
+
+            self.follow_service = FollowService(config)
+        except Exception:
+            self.follow_error = "跟单存储初始化失败，请检查跟单数据库路径和权限"
+
+    def server_close(self) -> None:
+        if self.follow_service is not None:
+            self.follow_service.stop()
+        super().server_close()
 
 
 def build_server(config: Dict[str, Any], poller, pool=None) -> DashboardServer:
@@ -729,6 +969,8 @@ def build_server(config: Dict[str, Any], poller, pool=None) -> DashboardServer:
 
 def serve(config: Dict[str, Any], poller) -> None:
     server = build_server(config, poller)
+    if server.follow_service is not None:
+        server.follow_service.start()
     print(f"[server] PS38 赛事看板：http://{config['host']}:{config['port']}/", flush=True)
     print("[server] 仅本机访问；浏览器完成登录/2FA 后自动开始拉取订单", flush=True)
     try:

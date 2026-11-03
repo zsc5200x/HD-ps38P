@@ -8,11 +8,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from ps38app.fixture_merge import (
-    MergeService, align_league_ids, current_fixture, fetch_crown_events,
+    MergeService, align_league_ids, current_fixture, fetch_crown_events, prepare_crown_event,
     fetch_pinnacle_events, _merge_event_sources, rank_fixture_candidates,
 )
 from ps38app.fixture_identity import fixture_identity_score
 from ps38app.crown_fixtures import CrownFeedError, fetch_pool_crown_events, parse_games
+from tests.support import upcoming_today
 
 
 class MatchingPipelineTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class MatchingPipelineTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         self.now = datetime.now(timezone.utc)
-        self.kickoff = self.now + timedelta(hours=2)
+        self.kickoff = upcoming_today(self.now)
         self.ps = {
             "id": "pin:1", "source": "pinnacle", "home": "River Plate", "away": "Boca Juniors",
             "name": "River Plate vs Boca Juniors", "league": "Argentina League", "leagueId": "p1",
@@ -57,6 +58,35 @@ class MatchingPipelineTests(unittest.TestCase):
             payload = self.service.payload()
         self.assertEqual(payload["ps38Events"], [])
         self.assertFalse(payload["sources"]["ps38"]["ok"])
+
+    def test_provider_variant_reuses_confirmed_id_without_rewriting_binding(self):
+        self.bind_leagues()
+        self.service.bind_fixture(self.ps["id"], self.crown["id"])
+        saved = self.service.store.list_mappings()[0]
+        self.service._pinnacle_source.return_value = (
+            [{**self.ps, "id": "pin:official-live", "pinnacleId": "official-live"}], None, "now"
+        )
+        payload = self.service.payload()
+        self.assertEqual(payload["ps38Events"][0]["id"], self.ps["id"])
+        self.assertEqual(payload["ps38Events"][0]["catalogId"], "pin:official-live")
+        self.assertEqual(payload["ps38Events"][0]["pinnacleId"], "official-live")
+        self.assertEqual(self.service._pinnacle_source.return_value[0][0]["id"], "pin:official-live")
+        self.assertEqual(self.service.store.list_mappings(), [saved])
+        self.assertFalse(payload["suggestions"])
+
+    def test_provider_variant_never_reuses_binding_for_ambiguous_or_different_fixture(self):
+        self.bind_leagues()
+        self.service.bind_fixture(self.ps["id"], self.crown["id"])
+        for rows in (
+            [{**self.ps, "id": "pin:new", "home": self.ps["away"], "away": self.ps["home"]}],
+            [{**self.ps, "id": "pin:new", "kickoffUtc": (self.kickoff + timedelta(hours=1)).isoformat()}],
+            [{**self.ps, "id": "pin:new", "home": "River Plate U19"}],
+            [{**self.ps, "id": "pin:new1"}, {**self.ps, "id": "pin:new2"}],
+        ):
+            with self.subTest(rows=rows):
+                self.service._pinnacle_source.return_value = (rows, None, "now")
+                payload = self.service.payload()
+                self.assertNotIn(self.ps["id"], [e["id"] for e in payload["ps38Events"]])
 
     def test_crown_enters_matching_after_league_binding_then_merged(self):
         payload = self.service.payload()
@@ -131,6 +161,54 @@ class MatchingPipelineTests(unittest.TestCase):
                         "kickoffUtc": (self.now - timedelta(hours=1)).isoformat()}, self.now))
         self.service._crown_source.return_value = ([{**self.crown, "is_finished": True}], None, "")
         self.assertEqual(self.service.payload()["crownEvents"], [])
+
+    def test_provider_today_is_not_cut_at_beijing_midnight(self):
+        now = datetime(2026, 11, 3, 15, 55, tzinfo=timezone.utc)  # Beijing 23:55
+        for kickoff, expected in (
+            ("2026-11-03T15:59:59+00:00", True),
+            ("2026-11-03T16:00:00+00:00", True),
+            ("2026-11-04T02:00:00+00:00", True),
+            ("2026-11-03T15:54:00+00:00", False),
+        ):
+            with self.subTest(kickoff=kickoff):
+                self.assertEqual(current_fixture({**self.ps, "scope": "today", "kickoffUtc": kickoff}, now), expected)
+        # An early-market entry is excluded even if its kickoff is today locally.
+        self.assertFalse(current_fixture({**self.ps, "scope": "early",
+                                         "kickoffUtc": "2026-11-03T15:59:59Z"}, now))
+        crown = prepare_crown_event({**self.crown, "scope": "today",
+                                     "start_label": "2026-11-03T22:00:00-04:00"})
+        self.assertTrue(crown["kickoffLocal"].startswith("2026-11-04"))
+        self.assertTrue(current_fixture(crown, now))
+
+    def test_live_fixture_survives_midnight_but_finished_fixture_does_not(self):
+        now = datetime(2026, 11, 3, 16, 5, tzinfo=timezone.utc)
+        event = {**self.ps, "isLive": True, "kickoffUtc": "2026-11-03T15:30:00Z"}
+        self.assertTrue(current_fixture(event, now))
+        self.assertFalse(current_fixture({**event, "isFinished": True}, now))
+
+    def test_pull_totals_and_matching_share_provider_scope(self):
+        tomorrow = (self.now + timedelta(days=1)).isoformat()
+        ps = [self.ps, {**self.ps, "id": "pin:tomorrow", "kickoffUtc": tomorrow, "scope": "today"},
+              {**self.ps, "id": "pin:early", "scope": "early"},
+              {**self.ps, "id": "pin:special", "league": "特别投注"}]
+        crowns = [self.crown, {**self.crown, "id": "c:tomorrow", "start_label": tomorrow, "scope": "today"},
+                  {**self.crown, "id": "c:early", "scope": "early"},
+                  {**self.crown, "id": "c:special", "league": "奇幻赛事"}]
+        self.service._pinnacle_source.return_value = (ps, None, "now")
+        self.service._crown_source.return_value = (crowns, None, "now")
+        self.bind_leagues()
+        with patch("ps38app.fixture_merge.fetch_pinnacle_events", return_value=(ps, None, "now")), \
+                patch("ps38app.fixture_merge.fetch_crown_events", return_value=(crowns, None, "now")):
+            self.assertEqual(self.service.pull_crown()["count"], 2)
+            self.assertEqual(self.service.pull_pinnacle()["count"], 2)
+        payload = self.service.payload()
+        self.assertEqual(payload["sources"]["crown"]["count"], 2)
+        self.assertEqual(payload["sources"]["ps38"]["count"], 2)
+        self.assertEqual({e["id"] for e in payload["matchEvents"]}, {"c1", "c:tomorrow"})
+        self.assertEqual({e["crownId"] for e in payload["mappings"]}, {"c1", "c:tomorrow"})
+        self.assertEqual(self.service.bind_fixture("pin:tomorrow", "c:tomorrow")["crownId"], "c:tomorrow")
+        with self.assertRaisesRegex(ValueError, "赛事列表已更新"):
+            self.service.bind_fixture("pin:early", "c:early")
 
     def test_ambiguous_candidates_never_auto_match_either_direction(self):
         self.bind_leagues()
@@ -258,8 +336,20 @@ class FeedTests(unittest.TestCase):
         body = ('<serverresponse><original>' + json.dumps({"1": game}) + '</original></serverresponse>').encode()
         event = parse_games(body, live=True)[0]
         self.assertEqual(event["start_label"], "2026-11-03T08:00:00-04:00")
+        self.assertEqual(event["scope"], "live")
+        self.assertEqual(parse_games(body, live=False)[0]["scope"], "today")
         xml = b'<serverresponse><ec><game><gid>1</gid><retimeset>1H^24:06</retimeset></game></ec></serverresponse>'
         self.assertEqual(parse_games(xml, live=True)[0]["start_label"], "")
+
+    def test_pinnacle_feed_preserves_source_scope_across_dates(self):
+        now = datetime(2026, 11, 3, 15, 55, tzinfo=timezone.utc)
+        raw = {"id": "1", "sportId": 29, "name": "A VS B", "league": "League",
+               "kickoff": "2026-11-04 03:00:00", "isLive": False, "scope": "today"}
+        with patch("http.client.HTTPConnection", return_value=self.response({"events": [raw]})):
+            events, error, _ = fetch_pinnacle_events({"pinnacle_snapshot_url": "http://localhost/api/snapshot"})
+        self.assertIsNone(error)
+        self.assertEqual(events[0]["scope"], "today")
+        self.assertTrue(current_fixture(events[0], now))
 
     def test_invalid_or_login_response_is_not_successful_empty_feed(self):
         for body in (b'<html>login</html>', b'<serverresponse><code>error</code><msg>doubleLogin</msg></serverresponse>',

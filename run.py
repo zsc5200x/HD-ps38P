@@ -83,6 +83,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     poller.start()
     if pool is not None:
         pool.start()
+    if server.follow_service is not None:
+        server.follow_service.start()
+    elif server.follow_error:
+        print(f"[warn] {server.follow_error}", flush=True)
 
     stopping = False
 
@@ -92,11 +96,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
             return
         stopping = True
         print("\n[app] 正在停止…", flush=True)
+        if server.follow_service is not None:
+            server.follow_service.stop()
         if pool is not None:
             pool.stop()
         poller.stop()
         # shutdown() must run outside the serve_forever thread.
         import threading
+
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
@@ -125,7 +132,9 @@ def cmd_login(args: argparse.Namespace) -> int:
             force=bool(args.force),
             on_status=lambda message: print(f"[login] {message}", flush=True),
         )
-        print(f"[login] 会话有效：{profile['user_code']}（userId={profile['user_id']}）", flush=True)
+        print(
+            f"[login] 会话有效：{profile['user_code']}（userId={profile['user_id']}）", flush=True
+        )
         return 0
     finally:
         session.close()
@@ -142,7 +151,10 @@ def cmd_backfill(args: argparse.Namespace) -> int:
                 f"[backfill] {state['done']}/{state['total']} {state['message']}", flush=True
             )
         )
-        print(f"[backfill] 完成：{result.get('message') or '无'}；共 {result.get('done', 0)} 批", flush=True)
+        print(
+            f"[backfill] 完成：{result.get('message') or '无'}；共 {result.get('done', 0)} 批",
+            flush=True,
+        )
         return 0
     finally:
         poller._close_session()  # noqa: SLF001 - deliberate one-shot shutdown
@@ -161,13 +173,19 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     try:
         summary = query_summary(connection)
-        agents = [dict(row) for row in connection.execute(
-            "SELECT code, user_id, name, resolved_at FROM partner_agents ORDER BY code"
-        )]
-        states = [dict(row) for row in connection.execute(
-            "SELECT agent_code, snapshot_type, last_success_at, record_count "
-            "FROM partner_poll_state ORDER BY agent_code, snapshot_type"
-        )]
+        agents = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT code, user_id, name, resolved_at FROM partner_agents ORDER BY code"
+            )
+        ]
+        states = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT agent_code, snapshot_type, last_success_at, record_count "
+                "FROM partner_poll_state ORDER BY agent_code, snapshot_type"
+            )
+        ]
     finally:
         connection.close()
     print(
@@ -219,7 +237,10 @@ def cmd_import_db(args: argparse.Namespace) -> int:
     store = OrderStore(target)  # ensure schema / migrations
     count = store.counts()
     store.close()
-    print(f"[import] 已导入 {count['total']} 单（未结算 {count['open']}，已结算 {count['settled']}）→ {target}", flush=True)
+    print(
+        f"[import] 已导入 {count['total']} 单（未结算 {count['open']}，已结算 {count['settled']}）→ {target}",
+        flush=True,
+    )
     return 0
 
 
@@ -229,6 +250,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"[doctor] 项目目录：{PROJECT_DIR}", flush=True)
     try:
         import playwright  # noqa: F401
+
         print("[doctor] playwright 已安装", flush=True)
     except Exception as exc:  # noqa: BLE001
         ok = False
@@ -239,12 +261,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"[doctor] 配置：{config_path()}", flush=True)
         print(f"[doctor] 数据库：{config['db_path']}", flush=True)
         print(f"[doctor] 端口：{config['host']}:{config['port']}", flush=True)
-        print(f"[doctor] 账号密码：{'已配置' if config.get('username') and config.get('password') else '未配置（浏览器手动登录）'}", flush=True)
+        print(
+            f"[doctor] 账号密码：{'已配置' if config.get('username') and config.get('password') else '未配置（浏览器手动登录）'}",
+            flush=True,
+        )
     except Exception as exc:  # noqa: BLE001
         ok = False
         print(f"[doctor] 配置错误：{exc}", flush=True)
     try:
         from playwright.sync_api import sync_playwright
+
         with sync_playwright() as pw:
             path = pw.chromium.executable_path
             exists = Path(path).exists()
@@ -261,16 +287,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_install_browser(args: argparse.Namespace) -> int:
     print("[install] 正在安装 Playwright Chromium…", flush=True)
-    result = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"], check=False
+    )
     return result.returncode
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PS38 赛事独立版（仅后台订单拉取，无跟单）")
-    parser.add_argument("command", nargs="?", default="serve",
-                        choices=["serve", "login", "backfill", "status", "import-db", "doctor", "install-browser"])
+    parser = argparse.ArgumentParser(description="PS38 赛事独立版：后台订单、赛事合并与跟单记录")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="serve",
+        choices=["serve", "login", "backfill", "status", "import-db", "doctor", "install-browser"],
+    )
     parser.add_argument("path", nargs="?", help="import-db 的源数据库路径")
-    parser.add_argument("--force", action="store_true", help="login 强制清 Cookie / import-db 覆盖目标")
+    parser.add_argument(
+        "--force", action="store_true", help="login 强制清 Cookie / import-db 覆盖目标"
+    )
     parser.add_argument("--debug", action="store_true", help="输出详细错误")
     parser.add_argument("--verbose", action="store_true", help="打印每个 HTTP 请求")
     return parser
@@ -290,7 +324,9 @@ def main(argv: Optional[list] = None) -> int:
     }
     handler = handlers[args.command]
     if args.command == "import-db" and not args.path:
-        print("用法：python run.py import-db <旧 partner_orders.sqlite3 路径> [--force]", flush=True)
+        print(
+            "用法：python run.py import-db <旧 partner_orders.sqlite3 路径> [--force]", flush=True
+        )
         return 2
     try:
         return handler(args)

@@ -14,15 +14,37 @@
 | PS38 登录、2FA 与会话恢复 | `ps38app/session.py` | 交互式登录与只读报表请求 |
 | 号池登录、心跳和状态 | `ps38app/account_pool/` | `service.py` 编排，`providers.py` 执行平台流程，`store.py` 管理本机状态 |
 | 皇冠赛事读取 | `ps38app/crown_fixtures.py` | 读取已保存会话，不主动触发新登录 |
+| 平博官方赛事目录 | `ps38app/pinnacle_fixtures.py`、`fixture_merge.py` | 目录提供赛事身份与赛前／滚球分类，订单统计按身份补充 |
 | 赛事对照、联赛绑定与映射存储 | `ps38app/fixture_merge.py`、`fixture_identity.py` | 严格匹配条件及人工确认，独立映射库 |
+| 跟单规则、分组与回执 | `ps38app/follow/` | 独立任务库，消费已提交源事件，平台适配与状态机分离 |
 | 页面导航与布局 | `web/modules/nav.js`、`web/styles/` | 显式模块导入，共用页面壳 |
-| 页面业务 | `web/modules/my-events/`、`merge/`、`pool.js` | 保持 API 数据请求和 DOM 事件职责清晰 |
+| 页面业务 | `web/modules/my-events/`、`merge/`、`copy/`、`pool.js` | 保持 API 数据请求和 DOM 事件职责清晰 |
 
 ## 运行数据
 
-订单库 `data/orders.sqlite3`、映射库 `data/fixture_merge.sqlite3`、账号池库 `data/accounts.sqlite3` 分别保存不同业务的数据。浏览器 profile、凭证和会话快照也位于 `data/`。整个目录是本机运行状态，已从 Git 排除。
+订单库 `data/orders.sqlite3`、映射库 `data/fixture_merge.sqlite3`、账号池库 `data/accounts.sqlite3` 和跟单任务库 `data/follow.sqlite3` 分别保存不同业务的数据。浏览器 profile、凭证和会话快照也位于 `data/`。整个目录是本机运行状态，已从 Git 排除。
 
 测试通过临时配置把数据库、profile 和账号目录全部指向临时目录。浏览器测试使用真实静态页面及本地模拟数据；测试不需要真实账号。
+
+## 跟单模块边界
+
+[跟单设计](FOLLOW_SYSTEM_DESIGN.md) 记录需求、实现与后续范围。`ps38app/follow/` 负责服务端，`web/modules/copy/` 负责记录页，`follow_db_path` 指向独立任务库。规则默认停用，首版只处理滚球足球单关，使用一个目标账号。
+
+服务从已提交的新单事件消费，完成订单标准化、已绑定赛事识别、20 秒持久化合组、正反向规则和盘口核验。采集线程负责订单采集；查盘和任务等待由独立服务承接，HTTP 层仅委托服务。`run.py` 管理服务启动，服务器关闭时停止后台任务。
+
+`follow/service.py` 编排本地调度、分类重试与核对；`follow/dispatcher.py` 使用固定大小执行器承接网络任务，不建立无界等待队列，按组键和账号去重。没有空位的组留在 SQLite，下一轮继续调度。查盘、提交和只读核对共享账号占用；`follow_claims` 的组主键和账号唯一约束同时保护多服务实例。
+
+任务库新增 `follow_history` 保存状态与原因变化，`follow_reconciliations` 保存自动、人工触发查询和人工登记的核对审计。`follow_attempts` 记录每次提交尝试；`RETRY_WAIT` 不改变冻结成员、金额和规则。`PREPARING` 的失效占用可恢复准备，`SUBMITTING` 中断后仅进入 `UNKNOWN`，核对中断保留次数及原截止时间。活占用不能按固定超时直接清除。
+
+`follow/reconcile.py` 严格验证查询成功、完整集合、账号、比赛与实际盘口 ID、球种、滚球、时段、玩法、方向、带符号线、人民币金额、时间及唯一有效票号。空集合、多候选或未知格式保持 `UNKNOWN`。同账号存在未知请求时阻止后续提交，避免新票据被归属给旧请求；继续合组不延长源单处理时效。人工登记受未知状态及占用约束，保留 `receipt_source=manual`，不伪装成即时平台回执。
+
+人民币口径由 `follow/source.py` 规范化：本后台的 THB 标签与 CNY／RMB 一样按原数字计算，保留 `reported_currency` 供明细核对；不修改原始订单库，也不做汇率换算。规则页不再配置币种，目标皇冠报价仍核对实际人民币账号。
+
+HTTP 服务先绑定端口，再初始化跟单状态恢复，重复启动失败不会修改运行中任务。皇冠请求共享准备阶段时间预算，并在请求间及响应体分块读取时响应停止；系统 DNS 解析和底层连接／响应头处理仍可能超出预算，不能将 `stop()` 的等待上限视为网络调用已必然退出。
+
+订单唯一键、源赛事身份、已确认映射键、皇冠比赛 ID 和实际盘口行 ID 分别表达不同对象。既有订单衍生赛事 ID 与官方目录 ID 不同，应建立显式关联；`reversedOrder` 的平台主客顺序与业务反向规则分别处理。
+
+持久化组保存成员原始订单键、规则版本、冻结金额及状态；页面即时计算的 20 秒归组仅用于统计。任务消费游标和组变化原子保存，重复读取由唯一约束吸收，处理结果未知时先核对。会话继续由现有账号池管理，独立任务库只保存账号引用和脱敏业务记录。
 
 ## 后续拆分顺序
 

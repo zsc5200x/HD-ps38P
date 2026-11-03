@@ -107,6 +107,15 @@ class WebBrowserTests(unittest.TestCase):
             "/api/my-events/summary": {"ok": True, "ready": False},
             "/api/my-events/events": {"ok": True, "ready": True, "events": [], "cursor": 0},
             "/api/merge": {"ok": True, "sources": {}, "counts": {}},
+            "/api/follow": {
+                "ok": True,
+                "service": {"enabled": False, "running": True, "scope": "live"},
+                "rule": {"enabled": False, "direction": "forward", "amount_mode": "fixed"},
+                "summary": {},
+                "rows": [],
+                "total": 0,
+                "accounts": [],
+            },
             "/api/pool": {
                 "ok": True,
                 "accounts": [

@@ -1,4 +1,5 @@
 import { bindMergeEvents } from "./modules/merge/page.js";
+import { bindCopyEvents } from "./modules/copy/page.js";
 import { bindMyEventsEvents } from "./modules/my-events/bindings.js";
 import { pollMyEventsEvents } from "./modules/my-events/page.js";
 import { bindTopNav } from "./modules/nav.js";
@@ -9,6 +10,7 @@ bindTopNav();
 bindMergeEvents();
 bindMyEventsEvents();
 bindPoolEvents();
+bindCopyEvents();
 
 window.setInterval(() => {
   if (!document.hidden) pollMyEventsEvents();

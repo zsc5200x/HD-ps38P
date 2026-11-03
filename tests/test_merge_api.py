@@ -10,7 +10,7 @@ from unittest import mock
 from ps38app import store
 from ps38app.fixture_merge import prepare_ps38_event
 from ps38app.server import DashboardServer
-from tests.support import isolated_config
+from tests.support import isolated_config, upcoming_today
 
 
 class StubPoller:
@@ -44,7 +44,7 @@ class StubPoller:
         pass
 
 
-EVENT_MS = int((datetime.now(timezone.utc) + timedelta(hours=2)).timestamp() * 1000)
+EVENT_MS = int(upcoming_today().timestamp() * 1000)
 
 
 def upstream_row():
@@ -153,6 +153,8 @@ class MergeApiTests(unittest.TestCase):
             status, payload = self.request("GET", "/api/merge")
             self.assertEqual(status, 200)
             self.assertTrue(payload["ok"])
+            self.assertEqual(payload["window"]["scope"], "provider_live_today")
+            self.assertEqual(payload["window"]["calendarBasis"], "provider")
             self.assertEqual(payload["sources"]["ps38"]["count"], 1)
             self.assertEqual(payload["sources"]["crown"]["count"], 1)
             self.assertEqual(len(payload["ps38Events"]), 1)

@@ -19,6 +19,7 @@ DEFAULTS: Dict[str, Any] = {
     "host": "127.0.0.1",
     "port": 8899,
     "db_path": "data/orders.sqlite3",
+    "follow_db_path": "data/follow.sqlite3",
     "profile_dir": "data/profile",
     "base_url": "https://www.ps38ag.com",
     "login_path": "/partner/zh-cn/login",
@@ -50,6 +51,7 @@ DEFAULTS: Dict[str, Any] = {
     "merge_db_path": "data/fixture_merge.sqlite3",
     "merge_seed_path": "ps38app/league_library_seed.tsv",
     "pinnacle_snapshot_url": "http://127.0.0.1:8787/api/snapshot",
+    "pinnacle_catalog_url": "https://www.ps3838.com/sports-service/sv/compact/events",
     "merge_horizon_hours": 72.0,
     "merge_past_hours": 24.0,
     "merge_excluded_leagues": [],
@@ -59,6 +61,7 @@ ENV_OVERRIDES = {
     "host": "PS38_HOST",
     "port": "PS38_PORT",
     "db_path": "PS38_DB_PATH",
+    "follow_db_path": "PS38_FOLLOW_DB",
     "profile_dir": "PS38_PROFILE_DIR",
     "base_url": "PS38_BASE_URL",
     "dashboard_path": "PS38_DASHBOARD_PATH",
@@ -80,6 +83,7 @@ ENV_OVERRIDES = {
     "merge_db_path": "PS38_MERGE_DB",
     "merge_seed_path": "PS38_MERGE_SEED",
     "pinnacle_snapshot_url": "PS38_PINNACLE_SNAPSHOT",
+    "pinnacle_catalog_url": "PS38_PINNACLE_CATALOG",
     "merge_horizon_hours": "PS38_MERGE_HORIZON",
     "merge_past_hours": "PS38_MERGE_PAST",
 }
@@ -162,17 +166,24 @@ def load_config() -> Dict[str, Any]:
     config["history_from"] = str(config.get("history_from") or "2026-07-01")
     try:
         from datetime import date as _date
+
         _date.fromisoformat(config["history_from"])
     except ValueError as exc:
         raise RuntimeError("配置 history_from 必须是 YYYY-MM-DD 日期") from exc
 
-    config["open_interval_seconds"] = max(1.0, _as_float(config.get("open_interval_seconds"), "open_interval_seconds"))
-    config["settled_interval_seconds"] = max(30.0, _as_float(config.get("settled_interval_seconds"), "settled_interval_seconds"))
+    config["open_interval_seconds"] = max(
+        1.0, _as_float(config.get("open_interval_seconds"), "open_interval_seconds")
+    )
+    config["settled_interval_seconds"] = max(
+        30.0, _as_float(config.get("settled_interval_seconds"), "settled_interval_seconds")
+    )
     config["settled_window_days"] = max(1, int(config.get("settled_window_days") or 7))
     config["page_size"] = max(20, min(500, int(config.get("page_size") or 200)))
 
     config["headless"] = _as_bool(config.get("headless", False))
-    config["pool_crown_ignore_https_errors"] = _as_bool(config.get("pool_crown_ignore_https_errors", True))
+    config["pool_crown_ignore_https_errors"] = _as_bool(
+        config.get("pool_crown_ignore_https_errors", True)
+    )
     config["minimize_after_login"] = _as_bool(config.get("minimize_after_login", False))
     config["backfill_on_first_run"] = _as_bool(config.get("backfill_on_first_run", True))
     channel = str(config.get("browser_channel") or "").strip()
@@ -181,6 +192,9 @@ def load_config() -> Dict[str, Any]:
     config["browser_channel"] = channel
 
     config["db_path"] = resolve_path(config.get("db_path"), DEFAULTS["db_path"])
+    config["follow_db_path"] = resolve_path(
+        config.get("follow_db_path"), DEFAULTS["follow_db_path"]
+    )
     config["profile_dir"] = resolve_path(config.get("profile_dir"), DEFAULTS["profile_dir"])
 
     config["crown_host"] = str(config.get("crown_host") or "127.0.0.1").strip() or "127.0.0.1"
@@ -195,9 +209,7 @@ def load_config() -> Dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise RuntimeError("配置 crown_utc_offset_minutes 必须是整数") from exc
     config["crown_utc_offset_minutes"] = max(-720, min(840, config["crown_utc_offset_minutes"]))
-    config["merge_db_path"] = resolve_path(
-        config.get("merge_db_path"), DEFAULTS["merge_db_path"]
-    )
+    config["merge_db_path"] = resolve_path(config.get("merge_db_path"), DEFAULTS["merge_db_path"])
     seed_raw = str(config.get("merge_seed_path") or "").strip()
     config["merge_seed_path"] = (
         str(resolve_path(seed_raw, DEFAULTS["merge_seed_path"])) if seed_raw else ""
@@ -205,6 +217,7 @@ def load_config() -> Dict[str, Any]:
     config["pinnacle_snapshot_url"] = str(
         config.get("pinnacle_snapshot_url") or DEFAULTS["pinnacle_snapshot_url"]
     ).strip()
+    config["pinnacle_catalog_url"] = str(config.get("pinnacle_catalog_url") or "").strip()
     try:
         config["merge_horizon_hours"] = float(config.get("merge_horizon_hours") or 72.0)
         config["merge_past_hours"] = float(config.get("merge_past_hours") or 24.0)
@@ -215,12 +228,13 @@ def load_config() -> Dict[str, Any]:
     excluded = config.get("merge_excluded_leagues") or []
     if isinstance(excluded, str):
         excluded = excluded.split(",")
-    config["merge_excluded_leagues"] = [
-        str(item).strip() for item in excluded if str(item).strip()
-    ] if isinstance(excluded, list) else []
+    config["merge_excluded_leagues"] = (
+        [str(item).strip() for item in excluded if str(item).strip()]
+        if isinstance(excluded, list)
+        else []
+    )
 
-    config["pool_db_path"] = resolve_path(config.get("pool_db_path"),
-                                          DEFAULTS["pool_db_path"])
+    config["pool_db_path"] = resolve_path(config.get("pool_db_path"), DEFAULTS["pool_db_path"])
     config["pool_dir"] = resolve_path(config.get("pool_dir"), DEFAULTS["pool_dir"])
     try:
         config["pool_check_interval_seconds"] = int(config.get("pool_check_interval_seconds") or 60)
@@ -228,7 +242,9 @@ def load_config() -> Dict[str, Any]:
         config["pool_check_timeout_seconds"] = int(config.get("pool_check_timeout_seconds") or 10)
     except (TypeError, ValueError) as exc:
         raise RuntimeError("pool 检测/登录超时必须是整数秒") from exc
-    config["pool_check_interval_seconds"] = max(15, min(3600, config["pool_check_interval_seconds"]))
+    config["pool_check_interval_seconds"] = max(
+        15, min(3600, config["pool_check_interval_seconds"])
+    )
     config["pool_login_timeout_seconds"] = max(60, min(1800, config["pool_login_timeout_seconds"]))
     config["pool_check_timeout_seconds"] = max(3, min(60, config["pool_check_timeout_seconds"]))
     return config
@@ -240,6 +256,7 @@ def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "host": config["host"],
         "port": config["port"],
         "db_path": str(config["db_path"]),
+        "follow_db_path": str(config.get("follow_db_path", "")),
         "base_url": config["base_url"],
         "agent_codes": list(config["agent_codes"]),
         "history_from": config["history_from"],
@@ -258,6 +275,7 @@ def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "merge_db_path": str(config.get("merge_db_path", "")),
         "merge_seed_path": str(config.get("merge_seed_path", "")),
         "pinnacle_snapshot_url": str(config.get("pinnacle_snapshot_url", "")),
+        "pinnacle_catalog_url": str(config.get("pinnacle_catalog_url", "")),
         "merge_horizon_hours": config.get("merge_horizon_hours", 72.0),
         "merge_past_hours": config.get("merge_past_hours", 24.0),
         "merge_excluded_leagues": list(config.get("merge_excluded_leagues") or []),

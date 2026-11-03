@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from . import store as order_store
 from .fixture_identity import fixture_identity_score, confirmed_aliases
+from .pinnacle_fixtures import catalog_path, parse_catalog
 
 DISPLAY_TZ = timezone(timedelta(hours=8))
 DEFAULT_CROWN_OFFSET_MINUTES = -240
@@ -356,10 +357,14 @@ def prepare_crown_event(raw: Dict[str, Any], offset_minutes: Any = DEFAULT_CROWN
         "league": str(raw.get("league") or "").strip(),
         "leagueId": str(raw.get("league_id", raw.get("leagueId")) or "").strip(),
         "providerLeagueId": str(raw.get("league_id", raw.get("leagueId")) or "").strip(),
+        "homeId": str(raw.get("home_id", raw.get("homeId")) or "").strip(),
+        "awayId": str(raw.get("away_id", raw.get("awayId")) or "").strip(),
+        "ecid": str(raw.get("ecid") or "").strip(),
         "startLabel": start_label,
         "kickoffUtc": _iso_utc(kickoff),
         "kickoffLocal": _display_time(kickoff),
         "isLive": bool(raw.get("is_live", raw.get("isLive"))),
+        "scope": str(raw.get("scope") or raw.get("showtype") or "").strip().lower(),
         "isFinished": bool(raw.get("is_finished", raw.get("isFinished"))),
         "score": str(raw.get("score") or ""),
         "minute": str(raw.get("minute") or ""),
@@ -374,19 +379,26 @@ def event_kickoff(event: Dict[str, Any]) -> Optional[datetime]:
 
 
 def current_fixture(event: Dict[str, Any], now: datetime, horizon_hours: float = 72) -> bool:
-    """A historical inplay order flag is never current live evidence."""
+    """Respect the source's live/today scope without imposing a local date cut."""
     if event.get("isFinished") or str(event.get("matchStatus") or "").upper() in {
         "FINISHED", "ENDED", "FT", "FULL_TIME", "CLOSED", "CANCELLED", "CANCELED", "SETTLED",
     }:
         return False
     if any(word in str(event.get("league") or "") for word in ("奇幻赛事", "特别投注")):
         return False
+    # Sources define their own daily boundary. Older current-feed responses
+    # without scope still use the validity checks below, never a local date.
+    scope = str(event.get("scope") or "").strip().lower()
+    if scope and scope not in {"live", "today"}:
+        return False
     kickoff = event_kickoff(event)
     live = bool(event.get("isLive")) and event.get("source") != "ps38"
     if kickoff is None:
         return live
     hours = (kickoff - now).total_seconds() / 3600
-    return (-LIVE_MAX_HOURS <= hours <= horizon_hours) if live else (0 <= hours <= horizon_hours)
+    if live:
+        return -LIVE_MAX_HOURS <= hours <= horizon_hours
+    return 0 <= hours <= horizon_hours
 
 
 def align_league_ids(events, mappings, side):
@@ -1042,28 +1054,41 @@ def fetch_crown_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Op
 def fetch_pinnacle_events(
     config: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Any]], Optional[str], str]:
-    """Read the local PS3838/Pinnacle snapshot service (read-only)."""
-    url = str(config.get("pinnacle_snapshot_url") or "").strip()
+    """Read the provider catalog, or an explicitly configured legacy snapshot."""
+    catalog_url = str(config.get("pinnacle_catalog_url") or "").strip()
+    url = catalog_url or str(config.get("pinnacle_snapshot_url") or "").strip()
     if not url:
-        return [], "未配置平博快照地址。", ""
+        return [], "未配置平博赛事地址。", ""
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return [], "平博快照地址无效。", ""
+        return [], "平博赛事地址无效。", ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     path = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+    if catalog_url:
+        path = catalog_path(url)
     error = "平博快照服务暂不可用；请确认 PS3838 采集已启动。"
+    if catalog_url:
+        error = "平博官方赛事清单暂不可用，请稍后重新拉取。"
     try:
         connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         connection = connection_type(parsed.hostname, port, timeout=8)
         try:
-            connection.request("GET", path, headers={"Connection": "close"})
+            connection.request("GET", path, headers={
+                "Connection": "close", "Accept": "application/json", "User-Agent": "Mozilla/5.0",
+            })
             response = connection.getresponse()
             body = response.read(8 * 1024 * 1024 + 1)
             if response.status != 200:
-                return [], f"平博快照服务返回 HTTP {response.status}。", ""
+                return [], f"平博赛事服务返回 HTTP {response.status}。", ""
             if len(body) > 8 * 1024 * 1024:
                 return [], "平博快照数据过大，已拒绝读取。", ""
             payload = json.loads(body.decode("utf-8"))
+            if catalog_url:
+                try:
+                    raw_catalog = parse_catalog(payload)
+                except ValueError as exc:
+                    return [], str(exc), ""
+                payload = {"events": raw_catalog}
             raw_events = payload.get("events") if isinstance(payload, dict) else None
             if not isinstance(raw_events, list):
                 return [], "平博快照数据格式不正确。", ""
@@ -1098,6 +1123,7 @@ def fetch_pinnacle_events(
                     "kickoffUtc": _iso_utc(kickoff),
                     "kickoffLocal": _display_time(kickoff),
                     "isLive": bool(raw.get("isLive")),
+                    "scope": str(raw.get("scope") or "").strip().lower(),
                     "isFinished": bool(raw.get("isFinished", raw.get("is_finished"))),
                     "matchStatus": str(raw.get("matchStatus") or ""),
                     "homeEn": str(raw.get("homeEn") or ""),
@@ -1174,8 +1200,39 @@ def _merge_event_sources(
         matched = buckets.get(key) if key else None
         if matched is not None:
             event = {**event, **{key: matched.get(key) for key in ("orders", "members", "stake", "lastOrderAt")}}
-        result.append(event)
+        result.append(dict(event))
     return result
+
+
+def align_pinnacle_event_ids(events, mappings):
+    """Keep confirmed IDs when the same fixture appears in another feed variant."""
+    def identity(event):
+        kickoff = event_kickoff(event)
+        league = str(event.get("leagueId") or "")
+        home = re.sub(r"[\s\u200e\u200f]+", "", str(event.get("home") or "")).casefold()
+        away = re.sub(r"[\s\u200e\u200f]+", "", str(event.get("away") or "")).casefold()
+        if not kickoff or not league or not home or not away:
+            return None
+        return league, int(kickoff.timestamp()), home, away
+
+    saved = {}
+    current = {}
+    for mapping in mappings:
+        key = identity(mapping.get("ps38Snapshot") or {})
+        if key:
+            saved.setdefault(key, []).append(str(mapping["ps38Id"]))
+    for event in events:
+        key = identity(event)
+        if key:
+            current.setdefault(key, []).append(event)
+    present_ids = {event["id"] for event in events}
+    for key, rows in current.items():
+        ids = saved.get(key, [])
+        if len(rows) != 1 or len(ids) != 1 or ids[0] in present_ids:
+            continue
+        rows[0]["catalogId"] = rows[0]["id"]
+        rows[0]["id"] = ids[0]
+        present_ids.add(ids[0])
 
 
 def _snapshot_league(league: Dict[str, Any]) -> Dict[str, Any]:
@@ -1224,7 +1281,8 @@ class MergeService:
     def _pinnacle_source(self) -> Tuple[List[Dict[str, Any]], Optional[str], str]:
         with self._pinnacle_lock:
             now = time.monotonic()
-            if self._pinnacle_cache is not None and now - self._pinnacle_cache[0] < 3.0:
+            ttl = 30.0 if self.config.get("pinnacle_catalog_url") and self._pinnacle_cache and not self._pinnacle_cache[2] else 3.0
+            if self._pinnacle_cache is not None and now - self._pinnacle_cache[0] < ttl:
                 _, events, error, fetched = self._pinnacle_cache
                 return events, error, fetched
             events, error, fetched = fetch_pinnacle_events(self.config)
@@ -1239,8 +1297,12 @@ class MergeService:
         if error and not events:
             raise CrownUnavailable(error)
         matched = self._auto_after_refresh()
+        now = datetime.now(timezone.utc)
+        current = self._current_events(
+            [prepare_crown_event(event, self.offset_minutes, now) for event in events], now
+        )
         return {
-            "count": len(events),
+            "count": len(current),
             "fetchedAt": fetched,
             "refreshed": True,
             **matched,
@@ -1254,7 +1316,7 @@ class MergeService:
         if error and not events:
             raise ValueError(error)
         matched = self._auto_after_refresh()
-        return {"count": len(events), "fetchedAt": fetched,
+        return {"count": len(self._current_events(events)), "fetchedAt": fetched,
                 **matched}
 
     def _auto_after_refresh(self) -> Dict[str, Any]:
@@ -1265,6 +1327,18 @@ class MergeService:
             return {"autoBound": len(result["mappedFixtures"])}
         except (CrownUnavailable, ValueError) as exc:
             return {"autoBound": 0, "autoError": str(exc)}
+
+    def _current_events(self, events: List[Dict[str, Any]],
+                        now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Apply the same scope to pull counts, matching, and page totals."""
+        now = now or datetime.now(timezone.utc)
+        horizon = float(self.config.get("merge_horizon_hours") or 72.0)
+        excluded = {str(name).strip().casefold()
+                    for name in (self.config.get("merge_excluded_leagues") or [])
+                    if str(name).strip()}
+        return [event for event in events
+                if current_fixture(event, now, horizon)
+                and str(event.get("league") or "").casefold() not in excluded]
 
     def _catalog(self) -> Dict[str, Any]:
         """Current validated events; manual confirmation needs no candidate ranking."""
@@ -1280,21 +1354,12 @@ class MergeService:
         crown_events = [
             prepare_crown_event(event, self.offset_minutes, now) for event in crown_raw
         ]
-        ps_events = [event for event in ps_events if current_fixture(event, now, horizon_hours)]
-        crown_events = [event for event in crown_events if current_fixture(event, now, horizon_hours)]
-        excluded = {
-            str(name).strip().casefold()
-            for name in (self.config.get("merge_excluded_leagues") or [])
-            if str(name).strip()
-        }
-        if excluded:
-            ps_events = [event for event in ps_events
-                         if str(event.get("league") or "").casefold() not in excluded]
-            crown_events = [event for event in crown_events
-                            if str(event.get("league") or "").casefold() not in excluded]
+        ps_events = self._current_events(ps_events, now)
+        crown_events = self._current_events(crown_events, now)
         league_mappings = self.store.list_league_mappings()
         align_league_ids(ps_events, league_mappings, "ps38")
         align_league_ids(crown_events, league_mappings, "crown")
+        align_pinnacle_event_ids(ps_events, self.store.list_mappings())
         return {
             "past_hours": past_hours,
             "horizon_hours": horizon_hours,
@@ -1372,6 +1437,8 @@ class MergeService:
             "ok": True,
             "generatedAt": generated,
             "window": {
+                "scope": "provider_live_today",
+                "calendarBasis": "provider",
                 "pastHours": pools["past_hours"],
                 "horizonHours": pools["horizon_hours"],
             },

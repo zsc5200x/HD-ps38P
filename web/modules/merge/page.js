@@ -170,13 +170,16 @@ function renderStatus() {
       ? `更新 ${String(data.generatedAt || "").slice(11, 19)}`
       : "读取中…";
   }
-  if ($("mergePs38Source")) {
-    $("mergePs38Source").title = ps38
-      ? `${ps38.count} 场赛事 / ${ps38.leagueCount} 个联赛`
-      : "尚未读取";
-  }
-  if ($("mergeCrownSource")) {
-    $("mergeCrownSource").title = crown?.error || (crown ? `${crown.count} 场赛事` : "尚未读取");
+  for (const [id, source, events] of [
+    ["mergePs38Source", ps38, data?.ps38Events],
+    ["mergeCrownSource", crown, data?.crownEvents],
+  ]) {
+    const target = $(id);
+    if (!target) continue;
+    const live = (events || []).filter((event) => event.isLive).length;
+    target.title = source?.error || source?.warning || (source
+      ? `${source.count} 场 / ${source.leagueCount} 个联赛 · 滚球 ${live} 场 + 今日未开赛 ${source.count - live} 场（按各平台系统口径）`
+      : "尚未读取");
   }
 
   if (data?.crownError) {
@@ -344,7 +347,7 @@ function renderFixtures() {
     return;
   }
   if ($("mergeFixtureHint")) {
-    $("mergeFixtureHint").textContent = "点击「确认比赛」直接合并当前显示的平博候选；需要更换时，展开比赛选择。确认后进入「已合并」。";
+    $("mergeFixtureHint").textContent = "范围：滚球 + 今日未开赛（按各平台系统口径）。点击「确认比赛」直接合并当前候选；需要更换时，展开选择。";
   }
   const mappedPs = new Set(mappings.map((item) => item.ps38Id));
   const mappedCrown = new Set(mappings.map((item) => item.crownId));
