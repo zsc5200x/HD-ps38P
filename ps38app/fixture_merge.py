@@ -1465,13 +1465,9 @@ class MergeService:
         ps_events = catalog["ps_events"]
         crown_events = catalog["crown_events"]
         league_mappings = catalog["league_mappings"]
-        now = datetime.now(timezone.utc)
+        # Confirmed fixture pairs are a persistent record. Current feed/session
+        # availability only affects candidates for new pairs, never saved rows.
         mappings = self.store.list_mappings()
-        # As in hdproc's comparison view, retain confirmed fixtures for 48h.
-        # Keep older rows on disk so a UI filter never deletes user mappings.
-        mappings = [mapping for mapping in mappings
-                    if (event_kickoff(mapping.get("ps38Snapshot") or {})
-                        or _parse_iso(mapping.get("updatedAt")) or now) >= now - timedelta(hours=48)]
         crown_to_ps = {
             str(item["crownId"]): str(item["ps38Id"]) for item in league_mappings
         }

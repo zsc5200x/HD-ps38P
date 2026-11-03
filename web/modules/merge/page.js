@@ -391,7 +391,7 @@ function renderFixtures() {
       $("mergeFixtureMeta").textContent = `${mappings.length} 场已合并`;
     }
     const hint = $("mergeFixtureHint");
-    if (hint) hint.textContent = "按皇冠联赛分组，点击联赛展开已合并比赛。对照保留 48 小时；当前比赛解绑后可重新匹配。";
+    if (hint) hint.textContent = "按皇冠联赛分组，点击联赛展开已合并比赛。已确认对照持续保存并显示；仅拉取当前赛事和新增匹配需要皇冠会话。";
     renderMergedFixtures(host, mappings);
     return;
   }

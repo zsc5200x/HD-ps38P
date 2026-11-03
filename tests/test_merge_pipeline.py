@@ -280,14 +280,30 @@ class MatchingPipelineTests(unittest.TestCase):
             self.service.bind_fixture("pin:2", "c2")
         self.assertEqual(self.service.store.counts(), (0, 1))
 
-    def test_display_window_retains_database_and_recent_finished_mapping(self):
+    def test_saved_mappings_remain_visible_without_session_and_new_pairs_append(self):
+        self.bind_leagues()
         for hours in (24, 49):
             event = {**self.ps, "id": f"pin:{hours}",
                      "kickoffUtc": (self.now - timedelta(hours=hours)).isoformat()}
             self.service.store.map_events(event, {**event, "id": f"c:{hours}"})
+
+        self.service._crown_source.return_value = ([], "皇冠会员会话不可用", "")
         payload = self.service.payload()
-        self.assertEqual([m["ps38Id"] for m in payload["mappings"]], ["pin:24"])
+        self.assertFalse(payload["sources"]["crown"]["ok"])
+        self.assertEqual(
+            {m["ps38Id"] for m in payload["mappings"]}, {"pin:24", "pin:49"}
+        )
+        self.assertEqual(payload["counts"]["fixtureMappings"], 2)
         self.assertEqual(self.service.store.counts()[1], 2)
+
+        self.service._crown_source.return_value = ([self.crown], None, "now")
+        result = self.service.auto_merge()
+        self.assertEqual([item["crownId"] for item in result["mappedFixtures"]], ["c1"])
+        payload = self.service.payload()
+        self.assertEqual(payload["counts"]["fixtureMappings"], 3)
+        self.assertEqual(
+            {m["ps38Id"] for m in payload["mappings"]}, {"pin:24", "pin:49", "pin:1"}
+        )
 
     def test_saved_provider_id_resolves_translation_but_not_different_provider_id(self):
         mappings = [{"ps38Id": "p1", "ps38Snapshot": {"name": "English League", "providerId": "123"}}]

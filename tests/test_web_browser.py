@@ -244,6 +244,49 @@ class WebBrowserTests(unittest.TestCase):
         self.page.wait_for_timeout(650)
         self.assertEqual(self.merge_request_count, 1)
 
+    def test_saved_fixture_mappings_remain_visible_without_crown_session(self):
+        self.merge_response_sequence = [{
+            "ok": True,
+            "ready": True,
+            "refreshing": False,
+            "generatedAt": "2026-11-04T12:00:00+08:00",
+            "sources": {
+                "ps38": {"ok": True, "count": 0, "leagueCount": 0},
+                "crown": {"ok": False, "count": 0, "leagueCount": 0,
+                          "error": "皇冠会员会话不可用"},
+            },
+            "counts": {"leagueMappings": 1, "fixtureMappings": 1},
+            "ps38Events": [],
+            "crownEvents": [],
+            "ps38Leagues": [],
+            "crownLeagues": [],
+            "leagueMappings": [],
+            "mappings": [{
+                "ps38Id": "pin:old",
+                "crownId": "crown:old",
+                "updatedAt": "2026-11-01T12:00:00+08:00",
+                "ps38Snapshot": {
+                    "id": "pin:old", "league": "旧平博联赛",
+                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+                },
+                "crownSnapshot": {
+                    "id": "crown:old", "league": "旧皇冠联赛",
+                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+                },
+            }],
+            "leagueSuggestions": [],
+            "suggestions": [],
+            "crownError": "皇冠会员会话不可用",
+        }]
+        self.page.goto(f"{self.origin}/#/merge")
+        self.expect(self.page.locator("#mergeNotice")).to_contain_text("皇冠会员会话不可用")
+        merged_tab = self.page.locator('[data-merge-view="merged"]')
+        self.expect(merged_tab).to_have_text("已合并 1")
+        merged_tab.click()
+        self.expect(self.page.locator("#mergeFixtures")).to_contain_text("旧皇冠联赛")
+        self.expect(self.page.locator("#mergeFixtures")).to_contain_text("旧平博联赛")
+        self.expect(self.page.locator("#mergeFixtures")).to_contain_text("主队 vs 客队")
+
     def test_failed_pool_save_shows_error_and_keeps_the_page_usable(self):
         self.fail_save = True
         self.page.goto(f"{self.origin}/#/pool")
