@@ -4,11 +4,14 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
 from ps38app.server import DashboardServer
+from ps38app.store import OrderStore
 from tests.support import isolated_config
+from tests.test_follow_core import raw_order
 from tests.test_server import StubPoller
 
 
@@ -109,13 +112,72 @@ class FollowApiTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_default_query_is_confirmed_success_and_accounts_are_redacted(self):
+    def test_default_query_lists_all_and_accounts_are_redacted(self):
         status, payload = self.request("GET", "/api/follow")
         self.assertEqual(status, 200)
-        self.assertEqual(self.follow.calls[-1]["status"], "SUCCEEDED")
+        self.assertEqual(self.follow.calls[-1]["status"], "ALL")
         self.assertEqual([a["id"] for a in payload["accounts"]], ["crown-test"])
         self.assertTrue(payload["accounts"][0]["follow_eligible"])
         self.assertNotIn("must-not-leak", json.dumps(payload))
+
+    def test_homepage_copy_api_records_disabled_batch_without_submitting(self):
+        self.server.follow_service = self.real_service
+        orders = OrderStore(self.config["db_path"])
+        stats = {
+            "started_at": "2026-11-03T00:00:00+08:00",
+            "finished_at": "2026-11-03T00:00:01+08:00",
+            "elapsed_seconds": 1,
+            "request_count": 1,
+        }
+        created_ms = int(time.time() * 1000)
+        try:
+            orders.commit_snapshot("A", "OPEN", [], stats)
+            orders.commit_snapshot(
+                "A", "OPEN", [raw_order("homepage-order", "M1", created_ms)], stats
+            )
+        finally:
+            orders.close()
+
+        status, page = self.request(
+            "GET", "/api/my-events/copy-groups?status=OPEN&basis=created"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(len(page["rows"][0]["order_no"]), 8)
+        self.assertTrue(page["rows"][0]["order_no"].isdigit())
+        groups = self.real_service.snapshot("ALL")["rows"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["source_batch_no"], page["rows"][0]["order_no"])
+        self.assertEqual((groups[0]["status"], groups[0]["message"]),
+                         ("SKIPPED", "跟单未开启，未发送"))
+
+    def test_homepage_copy_api_does_not_auto_record_settled_batch(self):
+        self.server.follow_service = self.real_service
+        orders = OrderStore(self.config["db_path"])
+        stats = {
+            "started_at": "2026-11-03T00:00:00+08:00",
+            "finished_at": "2026-11-03T00:00:01+08:00",
+            "elapsed_seconds": 1,
+            "request_count": 1,
+        }
+        created_ms = int(time.time() * 1000)
+        settled = raw_order(
+            "homepage-settled-order", "M1", created_ms, status="SETTLED"
+        )
+        try:
+            orders.commit_snapshot("A", "SETTLED", [], stats)
+            orders.commit_snapshot("A", "SETTLED", [settled], stats)
+        finally:
+            orders.close()
+
+        status, page = self.request(
+            "GET", "/api/my-events/copy-groups?status=ALL&search=homepage-settled-order"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(len(page["rows"][0]["order_no"]), 8)
+        groups = self.real_service.snapshot("ALL")["rows"]
+        self.assertEqual(groups, [])
 
     def test_search_and_pagination_are_passed_to_service(self):
         status, _ = self.request(
@@ -158,38 +220,6 @@ class FollowApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 403)
         self.assertIsNone(self.follow.saved)
-
-    def test_reconcile_and_manual_resolution_routes(self):
-        self.assertEqual(
-            self.request("POST", "/api/follow/groups/group-test/reconcile", {})[0], 200
-        )
-        self.assertEqual(self.follow.calls[-1], ("reconcile", "group-test"))
-        body = {"outcome": "SUCCEEDED", "receipt_id": "TICKET-1", "note": "已在平台确认票号"}
-        self.assertEqual(
-            self.request("POST", "/api/follow/groups/group-test/resolution", body)[0], 200
-        )
-        self.assertEqual(self.follow.calls[-1], ("resolution", "group-test", body))
-        self.assertEqual(
-            self.request("POST", "/api/follow/groups/group-test/resolution", {})[0], 400
-        )
-        self.assertEqual(self.request("POST", "/api/follow/groups/missing/reconcile", {})[0], 404)
-        self.assertEqual(
-            self.request("POST", "/api/follow/groups/missing/resolution", body)[0], 404
-        )
-        self.assertEqual(self.request("POST", "/api/follow/groups/a%2Fb/reconcile", {})[0], 400)
-        self.assertEqual(self.request("POST", "/api/follow/groups/group-test/resubmit", {})[0], 404)
-
-    def test_cross_origin_reconcile_and_resolution_are_rejected(self):
-        for action in ("reconcile", "resolution"):
-            with self.subTest(action=action):
-                status, _ = self.request(
-                    "POST",
-                    "/api/follow/groups/group-test/" + action,
-                    {"outcome": "SUCCEEDED", "note": "平台已确认"},
-                    "https://foreign.invalid",
-                )
-                self.assertEqual(status, 403)
-        self.assertEqual(self.follow.calls, [])
 
     def test_detail_and_missing_group(self):
         status, payload = self.request("GET", "/api/follow/groups/group-test")

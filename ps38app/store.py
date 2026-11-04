@@ -701,6 +701,46 @@ def _copy_pick_key(row) -> tuple:
     return (str(row["market"] or ""), str(row["selection"] or ""), handicap, period_key)
 
 
+def _copy_group_key(base, start_ms) -> str:
+    """合并批次的稳定身份：同一个 20 秒窗口永远得到同一个键。"""
+    teams, event_ms, pick, score = base
+    payload = [teams, int(event_ms), list(pick), score, int(start_ms)]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _copy_member(row, score, *, include_internal=False) -> Dict[str, Any]:
+    """展开行里展示的一笔源单。"""
+    try:
+        odds = float(row["odds"]) if row["odds"] is not None else None
+    except (TypeError, ValueError):
+        odds = None
+    member = {
+        "order_id": str(row["order_id"] or ""),
+        "league": row["league"] or "",
+        "teams": row["teams"] or "",
+        "score": score,
+        "market": row["market"] or "",
+        "selection": row["selection"] or "",
+        "handicap": row["handicap"],
+        "period_type": row["period_type"],
+        "units": row["units"],
+        "corner_event_unit": row["corner_event_unit"],
+        "odds": odds,
+        "stake": float(row["stake"] or 0),
+        "agent": row["agent_code"] or "",
+        "member": str(
+            row["member_user_code"] or row["member_name"] or row["member_identity"] or ""
+        ),
+        "created_ms": int(row["created_ms"] or 0),
+        "status": str(row["status"] or ""),
+    }
+    if include_internal:
+        member["_source_row"] = dict(row)
+    return member
+
+
 def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
                       agent: Optional[str] = None, search: str = "",
                       limit: int = 50, offset: int = 0,
@@ -710,7 +750,8 @@ def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
                       from_utc: Optional[str] = None,
                       to_utc: Optional[str] = None,
                       window_ms: int = COPY_MERGE_WINDOW_MS,
-                      scan_limit: int = COPY_SCAN_LIMIT) -> Dict[str, Any]:
+                      scan_limit: int = COPY_SCAN_LIMIT,
+                      include_internal: bool = False) -> Dict[str, Any]:
     """Merge orders exactly like the Telegram push groups them.
 
     Base key = teams + kickoff + pick (market/side/handicap/period) + score.
@@ -723,9 +764,9 @@ def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
     rows = conn.execute(
         f"""
         SELECT * FROM (
-            SELECT order_id, agent_code, teams, league, market, selection, handicap,
+            SELECT source, order_id, agent_code, teams, league, market, selection, handicap,
                    odds, stake, status, member_identity, member_user_code, member_name,
-                   created_ms, inplay,
+                   created_ms, inplay, raw_json, content_hash, currency, sport,
                    json_extract(raw_json,'$.choices[0].score') AS score,
                    {FIXTURE_EVENT_MS} AS event_ms,
                    json_extract(raw_json,'$.choices[0].periodType') AS period_type,
@@ -754,6 +795,8 @@ def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
         group = active.get(base)
         if group is None or created - group["start_ms"] > window_ms:
             group = {
+                "group_key": _copy_group_key(base, created),
+                "sources": [],
                 "teams": row["teams"], "league": row["league"] or "",
                 "market": row["market"] or "", "selection": row["selection"] or "",
                 "handicap": row["handicap"], "period_type": row["period_type"],
@@ -766,6 +809,7 @@ def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
             }
             groups.append(group)
             active[base] = group
+        group["sources"].append(_copy_member(row, score, include_internal=include_internal))
         group["end_ms"] = max(group["end_ms"], created)
         group["orders"] += 1
         if str(row["status"] or "").upper() == "OPEN":
@@ -792,6 +836,8 @@ def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
     for group in groups:
         odds = group["odds"]
         merged.append({
+            "group_key": group["group_key"],
+            "sources": group["sources"],
             "teams": group["teams"], "league": group["league"],
             "market": group["market"], "selection": group["selection"],
             "handicap": group["handicap"], "period_type": group["period_type"],
@@ -809,9 +855,15 @@ def query_copy_groups(conn: sqlite3.Connection, status: Optional[str] = "ALL",
         })
     merged.sort(key=lambda item: -(item["end_ms"] or 0))
     total = len(merged)
+    start = max(0, int(offset))
+    end = start + max(1, int(limit))
+    # 展开明细只随当前页下发，避免一次把上万笔源单塞进响应。
+    for index, item in enumerate(merged):
+        if not start <= index < end:
+            item.pop("sources", None)
     return {
         "total": total,
-        "rows": merged[offset:offset + max(1, limit)],
+        "rows": merged[start:end],
         "window_ms": window_ms,
         "scanned": len(rows),
     }

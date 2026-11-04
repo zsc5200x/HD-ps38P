@@ -15,7 +15,7 @@ export const state = {
     basis: "created",
     hours: 24,
     tz: -240,
-    view: "orders",
+    view: "copy",
     rows: [],
     agents: [],
     total: 0,

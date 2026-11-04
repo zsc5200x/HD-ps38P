@@ -1,24 +1,16 @@
-"""只在已确认映射的平博侧识别来单；不即时猜测跨平台队名。"""
+"""只在已确认映射的平博侧识别来单；不即时猜测跨平台队名。
+
+映射本身就是"这场比赛 ↔ 那场比赛"的确认结果，运行期不再拿开赛时间做淘汰：
+时间只影响绑定阶段的审批，跟单执行只认联赛、主客队与唯一性。
+"""
 
 import hashlib
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from ..fixture_merge import competition_conflict, normalize_league, normalize_team
-
-
-def _time_ms(snapshot):
-    raw = snapshot.get("kickoffUtc") or snapshot.get("normalizedKickoff") or snapshot.get("kickoff")
-    try:
-        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone(timedelta(hours=8)))
-        return int(stamp.timestamp() * 1000)
-    except (ValueError, TypeError, OverflowError):
-        return None
 
 
 def resolve_fixture(path, intent):
@@ -58,9 +50,6 @@ def resolve_fixture(path, intent):
             for side in ("home", "away")
         ):
             continue
-        kickoff = _time_ms(pinnacle)
-        if kickoff is None or abs(kickoff - intent["event_ms"]) > 900_000:
-            continue
         source_id = intent.get("source_event_id")
         if source_id:
             ids = {str(pinnacle.get(key) or "") for key in ("pinnacleId", "catalogId", "id")}
@@ -73,9 +62,6 @@ def resolve_fixture(path, intent):
         if not crown.get("home") or not crown.get("away") or crown.get("isFinished"):
             continue
         if competition_conflict(pinnacle.get("league"), crown.get("league")):
-            continue
-        crown_time = _time_ms(crown)
-        if crown_time is None or abs(crown_time - intent["event_ms"]) > 900_000:
             continue
         fingerprint = hashlib.sha256(
             json.dumps(

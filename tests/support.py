@@ -23,6 +23,8 @@ def isolated_config(root: Path) -> Dict[str, Any]:
         port=0,
         db_path=root / "orders.sqlite3",
         follow_db_path=root / "follow.sqlite3",
+        copy_orders_db_path=root / "copy_orders.sqlite3",
+        monitor_db_path=root / "monitor.sqlite3",
         profile_dir=root / "profile",
         pool_db_path=root / "accounts.sqlite3",
         pool_dir=root / "accounts",

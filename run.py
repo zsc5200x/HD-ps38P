@@ -87,6 +87,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
         server.follow_service.start()
     elif server.follow_error:
         print(f"[warn] {server.follow_error}", flush=True)
+    if server.monitor_service is not None:
+        server.monitor_service.start()
+    elif server.monitor_error:
+        print(f"[warn] {server.monitor_error}", flush=True)
+    if server.notify_service is not None:
+        server.notify_service.start()
+    elif server.notify_error:
+        print(f"[warn] {server.notify_error}", flush=True)
 
     stopping = False
 
@@ -98,6 +106,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print("\n[app] 正在停止…", flush=True)
         if server.follow_service is not None:
             server.follow_service.stop()
+        if server.notify_service is not None:
+            server.notify_service.stop()
+        if server.monitor_service is not None:
+            server.monitor_service.stop()
         if pool is not None:
             pool.stop()
         poller.stop()

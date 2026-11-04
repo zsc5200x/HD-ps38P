@@ -76,6 +76,9 @@ class FollowBrowserTests(unittest.TestCase):
                 "status": "online",
                 "enabled": True,
                 "follow_eligible": True,
+                "latency_ms": 420,
+                "balance": "1700",
+                "balance_currency": "CNY",
             },
             {
                 "id": "crown-invalid-session",
@@ -85,6 +88,9 @@ class FollowBrowserTests(unittest.TestCase):
                 "status": "online",
                 "enabled": True,
                 "follow_eligible": False,
+                "latency_ms": 860,
+                "balance": "700",
+                "balance_currency": "CNY",
             }
         ]
         common = {
@@ -250,11 +256,38 @@ class FollowBrowserTests(unittest.TestCase):
             return
         responses = {
             "/api/status": {"ok": True, "session": {"status": "online"}, "backfill": {}},
+            "/api/notify": {
+                "ok": True,
+                "enabled": False,
+                "configured": False,
+                "has_token": False,
+                "token_hint": "",
+                "chat_id": "",
+                "proxy": "",
+                "push_result": True,
+                "bot_username": "",
+                "last_error": "",
+                "last_sent_at": "",
+                "sent_count": 0,
+            },
             "/api/my-events": {"ok": True, "ready": True, "rows": [], "total": 0, "agents": []},
+            "/api/my-events/copy-groups": {
+                "ok": True,
+                "ready": True,
+                "rows": [],
+                "total": 0,
+                "agents": [],
+                "window_ms": 20000,
+            },
             "/api/my-events/summary": {"ok": True, "ready": False},
             "/api/my-events/events": {"ok": True, "ready": True, "events": [], "cursor": 0},
             "/api/merge": {"ok": True, "sources": {}, "counts": {}},
             "/api/pool": {"ok": True, "accounts": [], "summary": {}, "logs": []},
+            "/api/monitor": {
+                "ok": True,
+                "endpoints": [],
+                "summary": {"total": 0, "online": 0, "offline": 0, "interval": 30},
+            },
         }
         if parsed.path in responses:
             route.fulfill(json=responses[parsed.path])
@@ -320,7 +353,7 @@ class FollowBrowserTests(unittest.TestCase):
 
     def open_unknown_detail(self):
         self.open_page()
-        self.page.locator('[data-copy-filter="UNKNOWN"]').click()
+        self.page.locator('[data-copy-filter="FAILED"]').click()
         self.page.locator("#copyRows [data-copy-detail]").click()
         self.expect(self.page.locator("#copyResolutionForm")).to_be_visible()
         self.expect(self.page.get_by_role("button", name="重新提交", exact=True)).to_have_count(0)
@@ -362,12 +395,6 @@ class FollowBrowserTests(unittest.TestCase):
             }
         ]
         self.reconciliations["retry-1"] = [
-            {
-                "at": "2026-11-03T08:00:25+08:00",
-                "method": "automatic",
-                "status": "UNKNOWN",
-                "message": "尚未唯一匹配",
-            }
         ]
         self.open_page()
         self.expect(self.page.locator("#copyActiveTasks")).to_have_text("1")
@@ -378,14 +405,20 @@ class FollowBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待重试")
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待可用会员")
         self.expect(self.page.locator("#copyRows")).to_contain_text("等待最新报价")
-        self.expect(self.page.locator("#copyRows")).to_contain_text("下次动作")
-        self.expect(self.page.locator("#copyRows")).to_contain_text("查盘 2 · 重试 1 · 核对 3")
-        self.expect(self.page.locator("#copyRows")).to_contain_text("MARKET_UNAVAILABLE")
+        # 卡面只保留主状态；下次动作、查盘/重试次数、错误分类放在明细弹窗里。
+        self.expect(self.page.locator("#copyRows")).not_to_contain_text("MARKET_UNAVAILABLE")
         # 左侧看板与会员池使用同一次 /api/follow 响应，不额外请求接口。
         self.expect(self.page.locator("#copyOnlineMembers")).to_have_text("2")
         self.expect(self.page.locator("#copyPoolList")).to_contain_text("皇冠测试账号")
-        self.expect(self.page.locator("#copyPoolList")).to_contain_text("自动分配候选")
-        self.expect(self.page.locator("#copyPoolList")).to_contain_text("会话校验未通过")
+        pool = self.page.locator("#copyPoolList")
+        self.expect(pool).to_contain_text("延迟")
+        self.expect(pool).to_contain_text("420 ms")
+        self.expect(pool).to_contain_text("余额")
+        self.expect(pool).to_contain_text("1,700 CNY")
+        self.expect(pool).to_contain_text("860 ms")
+        self.expect(pool).not_to_contain_text("自动分配候选")
+        self.expect(pool).not_to_contain_text("不参与自动分配")
+        self.expect(pool).not_to_contain_text("本页组数")
         self.expect(self.page.locator("#copyLogBody [data-copy-group]")).to_have_count(3)
         self.expect(self.page.locator("#copyLogBody")).to_contain_text("等待最新报价")
         self.page.locator('[data-copy-detail="retry-1"]').click()
@@ -393,19 +426,18 @@ class FollowBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#copyDetailContent")).to_contain_text(
             "核验盘口中 → 等待重试"
         )
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("核对审计")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("自动核对")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("2 / 1 / 3")
+        self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("核对审计")
+        self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("查盘 / 重试次数")
         self.expect(self.page.locator("#copyResolutionForm")).to_have_count(0)
 
-    def test_submission_attempt_detail_shows_timing_platform_error_and_request_state(self):
+    def test_submission_attempts_are_no_longer_rendered_in_the_detail(self):
         self.attempts["success-1"] = [
             {
                 "started_at": "2026-11-03T08:00:20+08:00",
                 "finished_at": "2026-11-03T08:00:23+08:00",
-                "account_id": "crown-local",
-                "status": "REJECTED",
-                "receipt_id": None,
+                "account_id": "fixture-crown",
+                "status": "SUCCEEDED",
+                "receipt_id": "25650324839",
                 "error_code": "1X001",
                 "request_sent": True,
                 "category": "INSUFFICIENT_FUNDS",
@@ -414,172 +446,46 @@ class FollowBrowserTests(unittest.TestCase):
         ]
         self.open_page()
         self.page.locator('[data-copy-detail="success-1"]').click()
-        attempts = self.page.locator(".copy-detail-section").filter(has=self.page.get_by_role("heading", name="提交尝试"))
-        self.expect(attempts).to_contain_text("开始时间")
-        self.expect(attempts).to_contain_text("结束时间")
-        self.expect(attempts).to_contain_text("耗时")
-        self.expect(attempts).to_contain_text("08:00:20")
-        self.expect(attempts).to_contain_text("08:00:23")
-        self.expect(attempts).to_contain_text("3 秒")
-        self.expect(attempts).to_contain_text("1X001")
-        self.expect(attempts).to_contain_text("已发送")
-        self.expect(attempts).to_contain_text("INSUFFICIENT_FUNDS")
-        self.expect(attempts).to_contain_text("余额不足，平台拒绝提交")
+        content = self.page.locator("#copyDetailContent")
+        self.expect(content).not_to_contain_text("提交尝试")
+        self.expect(content).not_to_contain_text("1X001")
+        self.expect(content).to_contain_text("状态历史")
 
-    def test_read_only_reconcile_has_audit_and_updates_status_without_resubmit(self):
-        self.open_unknown_detail()
-        self.fail_reconcile = True
-        self.page.locator("#copyReconcileRequest").click()
-        self.expect(self.page.locator("#copyDetailActionError")).to_have_text("模拟只读核对失败")
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_enabled()
-        self.fail_reconcile = False
-        self.hold_action = "reconcile"
-        self.page.locator("#copyReconcileRequest").click()
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_disabled()
-        self.expect(self.page.locator("#copyResolutionSubmit")).to_be_disabled()
-        self.expect(self.page.locator("#copyResolution-outcome")).to_be_disabled()
-        self.reconcile_outcome = "SUCCEEDED"
-        self.fulfill_action(self.pending_action_route, self.records[1], "reconcile")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("QUERY-123")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("平台注单只读核对")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("手动触发只读核对")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("待核对 → 跟单成功")
-        self.expect(self.page.locator("#copyReconcileRequest")).to_have_count(0)
-        self.expect(self.page.locator("#copyResolutionForm")).to_have_count(0)
-        self.assertEqual(self.resolutions, [])
-        self.assertTrue(all(path.endswith("/reconcile") for path in self.action_routes))
-
-    def test_manual_success_validates_preserves_failed_input_and_blocks_duplicate_post(self):
-        self.open_unknown_detail()
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyDetailActionError")).to_contain_text("请选择")
-        self.page.locator("#copyResolution-outcome").select_option("SUCCEEDED")
-        self.page.locator("#copyResolution-note").fill("已核实")
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyDetailActionError")).to_contain_text("有效的平台票号")
-        self.assertEqual(self.resolutions, [])
-        self.page.locator("#copyResolution-receipt_id").fill("MANUAL-123")
-        note = '<img src=x onerror="window.bad=true"> 已核实平台票号'
-        self.page.locator("#copyResolution-note").fill(note)
-        self.page.locator("#copyResolution-accepted_stake").fill("0")
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyDetailActionError")).to_contain_text("必须大于零")
-        self.assertEqual(self.resolutions, [])
-        self.page.locator("#copyResolution-accepted_stake").fill("59.5")
-        self.page.locator("#copyResolution-accepted_odds").fill("0.93")
-        self.fail_resolution = True
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyDetailActionError")).to_have_text("模拟核对登记失败")
-        self.expect(self.page.locator("#copyResolution-receipt_id")).to_have_value("MANUAL-123")
-        self.expect(self.page.locator("#copyResolution-note")).to_have_value(note)
-        self.expect(self.page.locator("#copyResolution-accepted_stake")).to_have_value("59.5")
-        self.page.evaluate(
-            "() => import('/static/modules/copy/page.js').then(m => m.refreshCopyRecords({force: true}))"
+    def test_success_detail_shows_receipt_summary_in_match_and_sources_first(self):
+        self.records[0].update(
+            receipt_id="25650324839",
+            target_stake="100",
+            accepted_stake="100",
+            accepted_odds="0.96",
         )
-        self.expect(self.page.locator("#copyResolution-note")).to_have_value(note)
-        self.page.locator("#copyDetailRefresh").click()
-        self.expect(self.page.locator("#copyResolution-note")).to_have_value(note)
-        self.fail_resolution = False
-        self.hold_action = "resolution"
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyResolutionSubmit")).to_be_disabled()
-        self.expect(self.page.locator("#copyResolution-note")).to_be_disabled()
-        self.page.locator("#copyResolutionForm").evaluate(
-            "form => form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}))"
-        )
-        self.assertEqual(len(self.action_routes), 2)
-        self.fulfill_action(self.pending_action_route, self.records[1], "resolution")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("人工核对成功")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("人工核对登记")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("MANUAL-123")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("59.5 CNY")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("0.93")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text(note)
-        self.expect(self.page.locator("#copyDetailContent img")).to_have_count(0)
-        self.assertFalse(self.page.evaluate("Boolean(window.bad)"))
-        self.expect(self.page.locator("#copyResolutionForm")).to_have_count(0)
-        self.assertEqual(len(self.resolutions), 2)
-        self.assertEqual(self.resolutions[-1]["accepted_stake"], "59.5")
-        self.assertEqual(self.reconcile_requests, [])
-        self.page.locator("#copyDetailClose").click()
-        self.page.locator('[data-copy-filter="SUCCEEDED"]').click()
-        self.expect(self.page.locator("#copyRows")).to_contain_text("人工核对成功")
-
-    def test_manual_rejected_ends_group_and_optional_amounts_stay_unknown(self):
-        self.page.set_viewport_size({"width": 390, "height": 844})
-        self.open_unknown_detail()
-        self.page.locator("#copyResolution-outcome").select_option("SUCCEEDED")
-        self.page.locator("#copyResolution-receipt_id").fill("DRAFT-123")
-        self.page.locator("#copyResolution-accepted_stake").fill("60")
-        self.page.locator("#copyResolution-outcome").select_option("REJECTED")
-        self.expect(self.page.locator("#copyResolution-receipt_id")).to_be_disabled()
-        self.expect(self.page.locator("#copyResolution-accepted_stake")).to_be_disabled()
-        self.page.locator("#copyResolution-note").fill("平台核实该请求未成交")
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("人工确认未成交")
-        self.expect(self.page.locator("#copyResolutionForm")).to_have_count(0)
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("人工登记")
-        self.assertEqual(self.resolutions[-1]["outcome"], "REJECTED")
-        self.assertEqual(self.resolutions[-1]["receipt_id"], "")
-        self.assertNotIn("accepted_stake", self.resolutions[-1])
-        self.assertNotIn("accepted_odds", self.resolutions[-1])
-        self.assertEqual(self.records[1]["accepted_stake"], None)
-        self.assertLessEqual(
-            self.page.locator("#copyDetailDialog").evaluate("el => el.scrollWidth"),
-            self.page.locator("#copyDetailDialog").evaluate("el => el.clientWidth"),
-        )
-
-    def test_manual_success_without_actual_amount_does_not_invent_receipt_values(self):
-        self.open_unknown_detail()
-        self.page.locator("#copyResolution-outcome").select_option("SUCCEEDED")
-        self.page.locator("#copyResolution-receipt_id").fill("MANUAL-EMPTY")
-        self.page.locator("#copyResolution-note").fill("已核实票号，平台未显示实际金额和水位")
-        self.page.locator("#copyResolutionSubmit").click()
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("人工核对成功")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("未登记实际金额")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("未登记实际水位")
-        self.assertNotIn("accepted_stake", self.resolutions[-1])
-        self.assertNotIn("accepted_odds", self.resolutions[-1])
-
-    def test_pending_action_close_reopen_and_late_response_preserve_current_view(self):
-        self.records.append({**self.records[1], "id": "unknown-2", "crown_home": "丙队"})
         self.open_page()
-        self.page.locator('[data-copy-filter="UNKNOWN"]').click()
-        self.page.locator('[data-copy-detail="unknown-1"]').click()
-        self.hold_action = "reconcile"
-        self.page.locator("#copyReconcileRequest").click()
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_disabled()
-        first_route = self.pending_action_route
-        self.page.locator("#copyDetailClose").click()
-        self.page.locator('[data-copy-detail="unknown-1"]').click()
-        self.expect(self.page.locator("#copyResolutionForm")).to_be_visible()
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_disabled()
-        self.expect(self.page.locator("#copyResolutionSubmit")).to_be_disabled()
-        self.fail_reconcile = True
-        self.fulfill_action(first_route, self.records[1], "reconcile")
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_enabled()
-        self.expect(self.page.locator("#copyDetailActionError")).to_be_hidden()
-        self.fail_reconcile = False
-        self.page.locator("#copyReconcileRequest").click()
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_disabled()
-        second_route = self.pending_action_route
-        self.page.locator("#copyDetailClose").click()
-        self.page.locator('[data-copy-detail="unknown-2"]').click()
-        self.expect(self.page.locator("#copyDetailTitle")).to_contain_text("丙队")
-        self.expect(self.page.locator("#copyReconcileRequest")).to_be_enabled()
-        self.page.locator("#copyResolution-outcome").select_option("SUCCEEDED")
-        self.page.locator("#copyResolution-receipt_id").fill("OTHER-DRAFT")
-        self.page.locator("#copyResolution-note").fill("另一组核对草稿")
-        self.reconcile_outcome = "SUCCEEDED"
-        self.fulfill_action(second_route, self.records[1], "reconcile")
-        self.page.evaluate(
-            "() => import('/static/modules/copy/page.js').then(m => m.refreshCopyRecords({force: true}))"
-        )
-        self.expect(self.page.locator("#copyDetailTitle")).to_contain_text("丙队")
-        self.expect(self.page.locator("#copyResolution-receipt_id")).to_have_value("OTHER-DRAFT")
-        self.expect(self.page.locator("#copyResolution-note")).to_have_value("另一组核对草稿")
-        self.expect(self.page.locator("#copyDetailActionError")).to_be_hidden()
-        self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("QUERY-123")
+        self.page.locator('[data-copy-detail="success-1"]').click()
+
+        match = self.page.locator(".copy-detail-match")
+        self.expect(match).to_contain_text("跟单成功")
+        outcome = match.locator(".copy-detail-outcome")
+        self.expect(outcome).to_contain_text("金额")
+        self.expect(outcome).to_contain_text("100 CNY")
+        self.expect(outcome).to_contain_text("水位")
+        self.expect(outcome).to_contain_text("@0.96")
+        self.expect(outcome).to_contain_text("回执号")
+        self.expect(outcome).to_contain_text("25650324839")
+        self.expect(outcome).to_contain_text("皇冠账号")
+        self.expect(outcome).to_contain_text("皇冠测试账号")
+        self.expect(self.page.locator("#copyDetailSources")).to_contain_text("查看来源订单")
+        self.expect(self.page.locator("#copyDetailSourcesTable")).to_have_count(0)
+        self.page.locator("#copyDetailSources").click()
+        self.expect(self.page.locator("#copyDetailSourcesTable")).to_contain_text("来源订单 · 1 笔")
+        self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("结果来源")
+        self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("查盘 / 重试次数")
+        self.expect(self.page.locator("#copyDetailContent")).not_to_contain_text("计划金额")
+
+        for viewport in ({"width": 375, "height": 812}, {"width": 812, "height": 375}):
+            self.page.set_viewport_size(viewport)
+            dimensions = self.page.locator("#copyDetailDialog").evaluate(
+                "element => ({width: element.clientWidth, scrollWidth: element.scrollWidth})"
+            )
+            self.assertLessEqual(dimensions["scrollWidth"], dimensions["width"])
 
     def test_shell_keeps_the_page_inside_the_viewport(self):
         self.records.extend(
@@ -604,28 +510,6 @@ class FollowBrowserTests(unittest.TestCase):
         self.assertLessEqual(metrics["scrollHeight"], metrics["viewport"])
         self.assertGreater(metrics["cardsScroll"], metrics["cardsClient"])
         self.assertTrue(metrics["statusbar"])
-
-    def test_success_receipts_default_and_unknown_are_separate(self):
-        self.open_page()
-        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(1)
-        self.expect(self.page.locator("#copyRows")).to_contain_text("R-123")
-        self.expect(self.page.locator("#copyPrevious")).to_be_hidden()
-        self.expect(self.page.locator("#copyMore")).to_be_hidden()
-        self.expect(self.page.locator("#copyRows")).to_contain_text("提交金额 · 回执未回显")
-        self.assertEqual(self.queries[0]["status"], ["SUCCEEDED"])
-        self.page.locator('[data-copy-filter="UNKNOWN"]').click()
-        self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(1)
-        self.expect(self.page.locator("#copyRows")).to_contain_text("待核对")
-        self.expect(self.page.locator("#copyRows")).not_to_contain_text("跟单成功")
-        self.page.locator("#copyRows [data-copy-detail]").click()
-        self.expect(self.page.locator("#copyDetailDialog")).to_be_visible()
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("source-1")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("后台币种标签")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("THB")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("100 CNY")
-        self.expect(self.page.locator("#copyDetailContent")).to_contain_text("尚无明确成交结果")
-        self.page.keyboard.press("Escape")
-        self.expect(self.page.locator("#copyDetailDialog")).to_be_hidden()
 
     def test_poll_does_not_overwrite_edits_and_save_is_explicit(self):
         self.open_page()
@@ -653,14 +537,14 @@ class FollowBrowserTests(unittest.TestCase):
         self.assertFalse(self.saves[-1]["enabled"])
         self.assertNotIn("currency", self.saves[-1])
         self.assertNotIn("account_id", self.saves[-1])
-        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已暂停")
+        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("跟单未开启")
         self.page.locator("#copyEnableRule").click()
         self.expect(self.page.locator("#copyRuleFeedback")).to_have_text("规则已保存，跟单已启用。")
         self.assertTrue(self.saves[-1]["enabled"])
         self.assertNotIn("account_id", self.saves[-1])
         self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已启用")
         self.page.locator("#copyPause").click()
-        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("已暂停")
+        self.expect(self.page.locator("#copyRuleSummary")).to_contain_text("跟单未开启")
 
     def test_errors_preserve_form_and_navigation_remains_usable(self):
         self.open_page()
@@ -675,8 +559,8 @@ class FollowBrowserTests(unittest.TestCase):
         self.fail_read = True
         self.page.locator('[data-page-link="copy"]').click()
         self.expect(self.page.locator("#copyLoadError")).to_contain_text("模拟读取失败")
-        self.expect(self.page.locator("#copyRows")).to_contain_text("R-123")
-        self.page.locator('[data-copy-filter="UNKNOWN"]').click()
+        self.expect(self.page.locator("#copyRows")).to_contain_text("跟单成功")
+        self.page.locator('[data-copy-filter="FAILED"]').click()
         self.expect(self.page.locator("#copyRecordCount")).to_have_text("记录读取失败")
         self.expect(self.page.locator("#copyRows [data-copy-group]")).to_have_count(0)
         self.page.locator('[data-page-link="settings"]').click()

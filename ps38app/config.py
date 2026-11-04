@@ -20,6 +20,8 @@ DEFAULTS: Dict[str, Any] = {
     "port": 8899,
     "db_path": "data/orders.sqlite3",
     "follow_db_path": "data/follow.sqlite3",
+    # 主页「跟单视角」合并单的 8 位单号登记库，与订单库分开写，避免和采集器争锁。
+    "copy_orders_db_path": "data/copy_orders.sqlite3",
     "profile_dir": "data/profile",
     "base_url": "https://www.ps38ag.com",
     "login_path": "/partner/zh-cn/login",
@@ -43,6 +45,8 @@ DEFAULTS: Dict[str, Any] = {
     "pool_login_timeout_seconds": 300,
     "pool_check_timeout_seconds": 10,
     "pool_crown_ignore_https_errors": True,
+    # 是否同时跟赛前（早盘）订单；关闭后只跟滚球。
+    "follow_allow_prematch": True,
     # Optional Crown feed used by the 赛事合并 page. The rest of the dashboard
     # keeps working when it is not running.
     "crown_host": "127.0.0.1",
@@ -52,6 +56,12 @@ DEFAULTS: Dict[str, Any] = {
     "merge_seed_path": "ps38app/league_library_seed.tsv",
     "pinnacle_snapshot_url": "http://127.0.0.1:8787/api/snapshot",
     "pinnacle_catalog_url": "https://www.ps3838.com/sports-service/sv/compact/events",
+    # 接口监控：只做连通性探测，不携带会员会话。
+    "monitor_db_path": "data/monitor.sqlite3",
+    "monitor_interval_seconds": 30,
+    "monitor_timeout_seconds": 8,
+    "monitor_beats": 24,
+    "monitor_endpoints": [],
     "merge_horizon_hours": 72.0,
     "merge_past_hours": 24.0,
     "merge_excluded_leagues": [],
@@ -62,6 +72,8 @@ ENV_OVERRIDES = {
     "port": "PS38_PORT",
     "db_path": "PS38_DB_PATH",
     "follow_db_path": "PS38_FOLLOW_DB",
+    "copy_orders_db_path": "PS38_COPY_ORDERS_DB",
+    "monitor_db_path": "PS38_MONITOR_DB",
     "profile_dir": "PS38_PROFILE_DIR",
     "base_url": "PS38_BASE_URL",
     "dashboard_path": "PS38_DASHBOARD_PATH",
@@ -194,6 +206,12 @@ def load_config() -> Dict[str, Any]:
     config["db_path"] = resolve_path(config.get("db_path"), DEFAULTS["db_path"])
     config["follow_db_path"] = resolve_path(
         config.get("follow_db_path"), DEFAULTS["follow_db_path"]
+    )
+    config["copy_orders_db_path"] = resolve_path(
+        config.get("copy_orders_db_path"), DEFAULTS["copy_orders_db_path"]
+    )
+    config["monitor_db_path"] = resolve_path(
+        config.get("monitor_db_path"), DEFAULTS["monitor_db_path"]
     )
     config["profile_dir"] = resolve_path(config.get("profile_dir"), DEFAULTS["profile_dir"])
 

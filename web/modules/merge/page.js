@@ -278,7 +278,7 @@ function renderLeagues() {
     return;
   }
   if (!unboundLeagues.length) {
-    host.append(node("div", "merge-empty", "当前皇冠联赛均已绑定，请在右侧「赛事匹配」对应比赛。"));
+    host.append(node("div", "merge-empty", "联赛已全部绑定"));
     return;
   }
   for (const league of unboundLeagues) {
@@ -399,13 +399,8 @@ function renderFixtures() {
     if ($("mergeFixtureMeta")) {
       $("mergeFixtureMeta").textContent = `${mappings.length} 场已合并`;
     }
-    const hint = $("mergeFixtureHint");
-    if (hint) hint.textContent = "按皇冠联赛分组，点击联赛展开已合并比赛。已确认对照持续保存并显示；仅拉取当前赛事和新增匹配需要皇冠会话。";
     renderMergedFixtures(host, mappings);
     return;
-  }
-  if ($("mergeFixtureHint")) {
-    $("mergeFixtureHint").textContent = "范围：滚球 + 今日未开赛（按各平台系统口径）。点击「确认比赛」直接合并当前候选；需要更换时，展开选择。";
   }
   const mappedPs = new Set(mappings.map((item) => item.ps38Id));
   const mappedCrown = new Set(mappings.map((item) => item.crownId));
@@ -638,6 +633,11 @@ function renderMergedFixtures(host, mappings) {
     host.append(node("div", "merge-empty", "还没有确认的合并关系。先绑定联赛，或点「自动合并」。"));
     return;
   }
+  const crownEventsById = new Map(
+    (data?.crownEvents || [])
+      .filter((event) => event?.id !== undefined && event?.id !== null)
+      .map((event) => [String(event.id), event]),
+  );
   const groups = new Map();
   for (const mapping of mappings) {
     const crown = mapping.crownSnapshot || {};
@@ -688,13 +688,16 @@ function renderMergedFixtures(host, mappings) {
       String(left.crownSnapshot?.kickoffUtc || left.crownSnapshot?.kickoffLocal || "")
         .localeCompare(String(right.crownSnapshot?.kickoffUtc || right.crownSnapshot?.kickoffLocal || "")),
     );
-    for (const mapping of group.fixtures) body.append(renderMergedFixtureRow(mapping));
+    for (const mapping of group.fixtures) {
+      const crownEvent = crownEventsById.get(String(mapping.crownId ?? ""));
+      body.append(renderMergedFixtureRow(mapping, crownEvent));
+    }
     wrapper.append(head, body);
     host.append(wrapper);
   }
 }
 
-function renderMergedFixtureRow(mapping) {
+function renderMergedFixtureRow(mapping, crownEvent) {
   const row = node("div", "merge-mapped-row");
   const left = node("div", "merge-mapped-side");
   const mergedPsId = mapping.ps38Snapshot?.providerLeagueId || "—";
@@ -707,10 +710,17 @@ function renderMergedFixtureRow(mapping) {
     node("small", "", `${shortTime(mapping.ps38Snapshot?.kickoffLocal)} · ${mapping.ps38Snapshot?.orders ?? "—"} 单`),
   );
   const right = node("div", "merge-mapped-side");
+  const crownHomeId = String(mapping.crownSnapshot?.homeId ?? "").trim()
+    || String(crownEvent?.homeId ?? "").trim()
+    || "—";
+  const crownAwayId = String(mapping.crownSnapshot?.awayId ?? "").trim()
+    || String(crownEvent?.awayId ?? "").trim()
+    || "—";
   right.append(
     node("span", "", `皇冠 · ${mergedCrownLeague} · ${mergedCrownId}`),
     node("strong", "", mapping.crownSnapshot?.name || mapping.crownId),
     node("small", "", shortTime(mapping.crownSnapshot?.kickoffLocal) || "时间未知"),
+    node("small", "merge-crown-team-ids", `主队 ID ${crownHomeId} · 客队 ID ${crownAwayId}`),
   );
   row.append(
     right,

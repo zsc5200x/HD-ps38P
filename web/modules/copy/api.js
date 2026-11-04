@@ -20,5 +20,3 @@ export async function readFollowDetail(id) {
 
 export const saveFollowRule = (rule) => postJson("/api/follow/rule", rule);
 export const pauseFollow = () => postJson("/api/follow/pause");
-export const requestFollowReconcile = (id) => postJson(`/api/follow/groups/${encodeURIComponent(id)}/reconcile`);
-export const resolveFollowResult = (id, result) => postJson(`/api/follow/groups/${encodeURIComponent(id)}/resolution`, result);

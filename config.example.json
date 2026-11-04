@@ -3,6 +3,7 @@
   "port": 8899,
   "db_path": "data/orders.sqlite3",
   "follow_db_path": "data/follow.sqlite3",
+  "copy_orders_db_path": "data/copy_orders.sqlite3",
   "profile_dir": "data/profile",
   "base_url": "https://www.ps38ag.com",
   "login_path": "/partner/zh-cn/login",

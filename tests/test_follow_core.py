@@ -1,7 +1,6 @@
-"""持久合组与恢复测试，所有订单、映射和执行器均为本地模拟。"""
+"""主页批次处理与恢复测试，所有订单、映射和执行器均为本地模拟。"""
 
 import copy
-import json
 import sqlite3
 import tempfile
 import threading
@@ -31,9 +30,11 @@ class Executor:
     def __init__(self, clock):
         self.clock = clock
         self.account_ids = ["crown-test"]
+        self.balances = {}
         self.prepared = []
         self.submitted = []
         self.result = None
+        self.results = []
         self.on_prepare = None
         self.quote_changes = {}
 
@@ -43,6 +44,9 @@ class Executor:
 
     def available_accounts(self):
         return list(self.account_ids)
+
+    def account_balances(self):
+        return dict(self.balances)
 
     def prepare(self, mapping, intent, account_id):
         self.prepared.append(copy.deepcopy(intent))
@@ -69,6 +73,8 @@ class Executor:
         self.submitted.append((quote, stake, account_id))
         if isinstance(self.result, Exception):
             raise self.result
+        if self.results:
+            return self.results.pop(0)
         return (
             self.result
             if self.result is not None
@@ -109,6 +115,28 @@ def raw_order(order_id="1", member="M1", created_ms=1_793_600_000_000, **overrid
     }
     row.update(overrides)
     return row
+
+
+class PrematchSourceTests(unittest.TestCase):
+    def prematch_raw(self):
+        return raw_order(choices=[{
+            "sportName": "足球", "btName": "AH", "handicap": "-0.5",
+            "selection": "HOME", "leagueName": "测试联赛",
+            "eventName": "测试甲 -vs- 测试乙", "eventDate": 1_793_596_400_000,
+            "eventId": "101", "inplay": False, "periodType": 0,
+        }])
+
+    def test_prematch_order_is_rejected_when_disabled(self):
+        with self.assertRaisesRegex(ValueError, "滚球"):
+            source_intent(parse_order(self.prematch_raw(), "A"))
+
+    def test_prematch_order_keeps_not_live_when_enabled(self):
+        intent = source_intent(parse_order(self.prematch_raw(), "A"), allow_prematch=True)
+        self.assertIs(intent["is_live"], False)
+        self.assertEqual(intent["market_type"], "HANDICAP")
+
+    def test_live_order_still_marked_live(self):
+        self.assertIs(source_intent(parse_order(raw_order(), "A"))["is_live"], True)
 
 
 class RuleTests(unittest.TestCase):
@@ -248,6 +276,7 @@ class FollowServiceTests(unittest.TestCase):
                 "currency": "CNY",
                 "amount_mode": "fixed",
                 "amount_value": "50",
+                "min_stake": 0,
                 **changes,
             }
         )
@@ -265,14 +294,62 @@ class FollowServiceTests(unittest.TestCase):
 
     def test_disabled_and_first_enable_never_replay_existing_orders(self):
         self.add()
-        self.tick(30)
-        self.assertEqual(self.groups(), [])
+        events, _, gap = self.service._events(0)
+        self.assertFalse(gap)
+        batches = self.service._copy_batches(events)
+        self.service.observe_home_batch_rows(batches)
+        disabled = self.groups()
+        self.assertEqual(len(disabled), 1)
+        self.assertEqual(disabled[0]["status"], "SKIPPED")
+        self.assertEqual(disabled[0]["message"], "跟单未开启，未发送")
+        self.assertRegex(disabled[0]["source_batch_no"], r"^\d{8}$")
+        self.assertEqual(self.executor.submitted, [])
+        self.clock.now += 21
         self.enable()
         self.tick()
-        self.assertEqual(self.groups(), [])
+        self.assertEqual(len(self.groups()), 1)
         self.add("2")
         self.tick()
-        self.assertEqual(self.groups()[0]["status"], "GROUPING")
+        active = next(group for group in self.groups() if group["status"] != "SKIPPED")
+        self.assertEqual(active["status"], "SUCCEEDED")
+        self.assertEqual(active["order_count"], 1)
+        self.assertEqual(len(self.executor.submitted), 1)
+
+    def test_disabled_homepage_observation_keeps_stale_batch_details_and_is_idempotent(self):
+        first_ms = int((self.clock.now - 150) * 1000)
+        second_ms = first_ms + 5_000
+        first = parse_order(raw_order("first", "M1", first_ms, stake="100"), "A")
+        second = parse_order(raw_order("second", "M2", second_ms, stake="200"), "A")
+        batch = {
+            "order_no": "12345678",
+            "group_key": "homepage-test-batch",
+            "open_orders": 0,
+            "end_ms": first_ms,
+            "sources": [{"_source_row": first}],
+        }
+        first["status"] = "SETTLED"
+
+        self.service.observe_home_batch_rows([batch], include_settled=True)
+        self.service.observe_home_batch_rows([batch], include_settled=True)
+        self.assertEqual(len(self.groups()), 1)
+        group = self.groups()[0]
+        self.assertEqual((group["status"], group["error_category"]), ("SKIPPED", "RULE_DISABLED"))
+        self.assertEqual(group["message"], "跟单未开启，未发送")
+        self.assertEqual((group["source_batch_no"], group["order_count"], group["source_stake"]),
+                         ("12345678", 1, "100"))
+        members = self.service.detail(group["id"])["members"]
+        self.assertEqual([(member["order_id"], member["stake"]) for member in members],
+                         [("first", "100")])
+
+        batch["sources"].append({"_source_row": second})
+        batch["open_orders"] = 2
+        batch["end_ms"] = second_ms
+        self.service.observe_home_batch_rows([batch])
+        self.assertEqual(len(self.groups()), 1)
+        group = self.groups()[0]
+        self.assertEqual((group["order_count"], group["source_stake"]), (1, "100"))
+        self.assertEqual(len(self.service.detail(group["id"])["members"]), 1)
+        self.assertEqual(self.executor.submitted, [])
 
     def test_groups_rotate_across_healthy_crown_members(self):
         self.executor.account_ids = ["crown-a", "crown-b"]
@@ -296,14 +373,57 @@ class FollowServiceTests(unittest.TestCase):
         self.tick(2)
         self.assertEqual(self.groups()[0]["status"], "SUCCEEDED")
 
+    def test_match_limit_caps_target_before_submit(self):
+        self.enable(amount_value="1000", match_limit_amount="400")
+        self.add()
+        self.tick()
+        group = self.groups()[0]
+        self.assertEqual(group["target_stake"], "400")
+        self.assertEqual(float(self.executor.submitted[0][1]), 400.0)
+        self.assertTrue(group["limit"]["limited"])
+
+    def test_split_order_splits_amount_and_requires_all_parts(self):
+        self.enable(amount_value="1000", split_count=2)
+        self.add()
+        self.tick()
+        group = self.groups()[0]
+        self.assertEqual(group["status"], "SUCCEEDED")
+        self.assertEqual([item[1] for item in self.executor.submitted], [500.0, 500.0])
+        self.assertEqual((group["split_total"], group["split_done"]), (2, 2))
+        self.assertEqual(group["split_tickets"], ["TEST-1", "TEST-2"])
+        self.assertEqual(group["receipt_id"], "TEST-1")
+        self.assertEqual(group["accepted_stake"], "1000")
+        parts = self.service.detail(group["id"])["parts"]
+        self.assertEqual([part["ticket_id"] for part in parts], ["TEST-1", "TEST-2"])
+
+    def test_split_partial_success_is_marked_partial(self):
+        self.enable(amount_value="1000", split_count=2)
+        self.executor.results = [
+            {
+                "status": "SUCCEEDED",
+                "receipt_id": "PART-1",
+                "accepted_stake": "500",
+                "accepted_odds": "0.95",
+            },
+            {"status": "REJECTED", "message": "平台拒绝"},
+        ]
+        self.add()
+        self.tick()
+        group = self.groups()[0]
+        self.assertEqual(group["status"], "PARTIAL")
+        self.assertEqual((group["split_total"], group["split_done"]), (2, 1))
+        self.assertEqual(group["split_tickets"], ["PART-1"])
+        self.assertEqual(group["accepted_stake"], "500")
+        self.assertIn("部分成功", group["message"])
+
     def test_enabling_requires_one_eligible_pool_member(self):
         self.executor.account_ids = []
         with self.assertRaisesRegex(ValueError, "在线且会话有效"):
             self.enable()
 
-    def test_group_three_orders_ratio_reverse_and_real_receipt(self):
+    def test_same_home_batch_is_processed_immediately_without_appending_later_orders(self):
         self.enable(amount_mode="ratio", amount_value="10", direction="reverse")
-        self.add(stake="100")
+        self.add(stake="600")
         self.tick()
         self.clock.now += 8
         self.add("2", "M2", stake="200")
@@ -311,11 +431,9 @@ class FollowServiceTests(unittest.TestCase):
         self.clock.now += 11
         self.add("3", "M3", stake="300")
         self.tick()
-        self.assertEqual(len(self.executor.submitted), 0)
-        self.tick(2)
         group = self.groups()[0]
         self.assertEqual(
-            (group["status"], group["order_count"], group["member_count"]), ("SUCCEEDED", 3, 3)
+            (group["status"], group["order_count"], group["member_count"]), ("SUCCEEDED", 1, 1)
         )
         self.assertEqual(
             (group["source_stake"], group["target_stake"], group["accepted_stake"]),
@@ -326,30 +444,36 @@ class FollowServiceTests(unittest.TestCase):
         )
         self.assertEqual(group["receipt_id"], "TEST-1")
         detail = self.service.detail(group["id"])
-        self.assertEqual(len(detail["members"]), 3)
+        self.assertEqual(len(detail["members"]), 1)
+        self.assertEqual(detail["members"][0]["order_id"], "1")
+        self.assertRegex(group["source_batch_no"], r"^\d{8}$")
         self.assertNotIn("raw_json", str(detail))
         self.tick(30)
         self.assertEqual(len(self.executor.submitted), 1)
 
-    def test_exact_twenty_second_boundary_and_later_group(self):
+    def test_homepage_batch_boundary_and_later_batch_are_processed_without_waiting(self):
         self.enable()
         self.add()
         self.tick()
+        self.assertEqual(len(self.executor.submitted), 1)
         self.clock.now += 20
         self.add("2")
         self.tick()
-        self.assertEqual(self.groups()[0]["order_count"], 2)
+        self.assertEqual(len(self.groups()), 1)
+        self.assertEqual(self.groups()[0]["order_count"], 1)
+        self.assertEqual(len(self.executor.submitted), 1)
         self.clock.now += 0.001
         self.add("3")
         self.tick()
         self.assertEqual(len(self.groups()), 2)
-        self.assertEqual(len(self.executor.submitted), 1)
-        self.assertEqual(self.executor.submitted[0][1], "50")
+        self.assertTrue(all(group["order_count"] == 1 for group in self.groups()))
+        self.assertEqual(len(self.executor.submitted), 2)
+        self.assertEqual([item[1] for item in self.executor.submitted], ["50", "50"])
 
     def test_thb_fixed_stake_remains_one_hundred_cny(self):
         self.enable(amount_value="100")
         self.add(currencyCode="THB", stake="800")
-        self.tick(21)
+        self.tick()
         group = self.groups()[0]
         self.assertEqual((group["status"], group["currency"]), ("SUCCEEDED", "CNY"))
         self.assertEqual((group["source_stake"], group["target_stake"]), ("800", "100"))
@@ -358,7 +482,7 @@ class FollowServiceTests(unittest.TestCase):
         self.assertEqual(detail["members"][0]["reported_currency"], "THB")
         self.assertEqual(detail["members"][0]["currency"], "CNY")
 
-    def test_thb_cny_rmb_join_one_ratio_group_without_conversion(self):
+    def test_later_currencies_in_same_home_batch_do_not_change_first_order_amount(self):
         self.enable(amount_mode="ratio", amount_value="10")
         for order_id, currency, stake in (
             ("1", "THB", "100"),
@@ -367,14 +491,14 @@ class FollowServiceTests(unittest.TestCase):
         ):
             self.add(order_id, currencyCode=currency, stake=stake)
             self.tick()
-        self.tick(21)
         self.assertEqual(len(self.groups()), 1)
         group = self.groups()[0]
-        self.assertEqual((group["source_stake"], group["target_stake"]), ("609", "60"))
-        self.assertEqual(self.executor.submitted[0][1], "60")
+        self.assertEqual((group["source_stake"], group["target_stake"]), ("100", "10"))
+        self.assertEqual(group["order_count"], 1)
+        self.assertEqual(self.executor.submitted[0][1], "10")
         self.assertEqual(
             {item["reported_currency"] for item in self.service.detail(group["id"])["members"]},
-            {"THB", "CNY", "RMB"},
+            {"THB"},
         )
 
     def test_old_rule_currency_needs_no_resave_and_terminal_orders_never_replay(self):
@@ -386,8 +510,9 @@ class FollowServiceTests(unittest.TestCase):
         self.add(currencyCode="THB")
         self.tick()
         with self.service.store.connect(write=True) as connection:
-            group = self.service.store.active_groups(connection)[0]
-            group.update(status="SKIPPED", message="原单币种与规则币种不同", currency="THB")
+            group = self.service.store.get_group(connection, self.groups()[0]["id"])
+            self.assertEqual(group["status"], "SUCCEEDED")
+            self.assertEqual(group["currency"], "CNY")
             self.service.store.save_group(connection, group)
         self.service.stop()
         self.service = FollowService(self.config, self.executor, self.clock)
@@ -395,90 +520,82 @@ class FollowServiceTests(unittest.TestCase):
         self.clock.now += 21
         self.add("2", currencyCode="THB")
         self.tick(21)
-        self.assertEqual(len(self.executor.submitted), 1)
-        self.assertEqual({group["status"] for group in self.groups()}, {"SKIPPED", "SUCCEEDED"})
+        self.assertEqual(len(self.executor.submitted), 2)
+        self.assertEqual({group["status"] for group in self.groups()}, {"SUCCEEDED"})
         self.service.stop()
         self.service = FollowService(self.config, self.executor, self.clock)
         with self.service.store.connect(write=True) as connection:
             self.service.store.set_meta(connection, "cursor", 0)
         self.tick()
-        self.assertEqual(len(self.executor.submitted), 1)
+        self.assertEqual(len(self.executor.submitted), 2)
 
-    def test_pending_legacy_thb_group_restores_and_combines_cny_order(self):
+    def test_existing_home_batch_is_not_extended_after_restart(self):
         self.enable(amount_mode="ratio", amount_value="10")
         self.add(currencyCode="THB", stake="100")
         self.tick()
-        with self.service.store.connect(write=True) as connection:
-            group = self.service.store.active_groups(connection)[0]
-            group["currency"] = group["intent"]["currency"] = group["rule"]["currency"] = "THB"
-            group["intent"].pop("reported_currency")
-            group["base_key"] = self.service._base_key(group["intent"], group["rule"])
-            self.service.store.save_group(connection, group)
-            member = self.service.store.get_members(connection, group["id"])[0]
-            member["currency"] = "THB"
-            member.pop("reported_currency")
-            connection.execute(
-                "UPDATE follow_members SET payload=? WHERE group_id=?",
-                (json.dumps(member), group["id"]),
-            )
+        first = self.groups()[0]
+        self.assertEqual((first["status"], first["source_stake"], first["target_stake"]),
+                         ("SUCCEEDED", "100", "10"))
         self.service.stop()
         self.service = FollowService(self.config, self.executor, self.clock)
         self.add("2", currencyCode="CNY", stake="200")
-        self.tick(21)
+        self.tick()
         self.assertEqual(len(self.groups()), 1)
         group = self.groups()[0]
-        self.assertEqual(
-            (group["status"], group["source_stake"], group["target_stake"]),
-            ("SUCCEEDED", "300", "30"),
-        )
+        self.assertEqual((group["status"], group["source_stake"], group["target_stake"]),
+                         ("SUCCEEDED", "100", "10"))
+        self.assertEqual(group["order_count"], 1)
         self.assertEqual(len(self.executor.submitted), 1)
-        self.assertEqual(self.service.detail(group["id"])["members"][0]["reported_currency"], "THB")
+        members = self.service.detail(group["id"])["members"]
+        self.assertEqual(len(members), 1)
+        self.assertEqual(members[0]["reported_currency"], "THB")
 
     def test_same_order_number_different_members_and_replayed_events(self):
         self.enable()
         self.add("1", "M1")
+        self.tick()
         self.add("1", "M2")
         self.tick()
-        self.tick(21)
         with self.service.store.connect() as connection:
             self.service.store.set_meta(connection, "cursor", 0)
         self.tick()
-        self.assertEqual(self.groups()[0]["order_count"], 2)
+        self.assertEqual(len(self.groups()), 1)
+        self.assertEqual(self.groups()[0]["order_count"], 1)
+        self.assertEqual(len(self.service.detail(self.groups()[0]["id"])["members"]), 1)
         self.assertEqual(len(self.executor.submitted), 1)
 
-    def test_restart_recovers_pending_group_without_duplicate_submission(self):
+    def test_restart_does_not_resubmit_a_processed_home_batch(self):
         self.enable()
         self.add()
         self.tick()
+        self.assertEqual(self.groups()[0]["status"], "SUCCEEDED")
         self.service.stop()
         self.service = FollowService(self.config, self.executor, self.clock)
-        self.tick(21)
+        self.tick()
         self.assertEqual(self.groups()[0]["status"], "SUCCEEDED")
         self.service.stop()
         self.service = FollowService(self.config, self.executor, self.clock)
         self.tick()
         self.assertEqual(len(self.executor.submitted), 1)
 
-    def test_restart_inflight_becomes_unknown(self):
+    def test_submit_exception_is_recorded_as_failure_and_never_retried(self):
+        self.executor.result = TimeoutError("模拟提交响应丢失")
         self.enable()
         self.add()
         self.tick()
-        with self.service.store.connect() as connection:
-            group = self.service.store.active_groups(connection)[0]
-            group["status"] = "SUBMITTING"
-            self.service.store.save_group(connection, group)
+        self.assertEqual(self.groups()[0]["status"], "REJECTED")
         self.service.stop()
         self.service = FollowService(self.config, self.executor, self.clock)
         self.tick(30)
-        self.assertEqual(self.groups()[0]["status"], "UNKNOWN")
-        self.assertEqual(self.executor.submitted, [])
+        self.assertEqual(self.groups()[0]["status"], "REJECTED")
+        self.assertEqual(len(self.executor.submitted), 1)
 
-    def test_timeout_is_unknown_and_never_retried(self):
+    def test_timeout_is_failure_and_never_retried(self):
         self.executor.result = TimeoutError("不可显示的连接细节")
         self.enable()
         self.add()
         self.tick(21)
-        self.assertEqual(self.groups()[0]["status"], "UNKNOWN")
+        self.assertEqual(self.groups()[0]["status"], "REJECTED")
         self.assertNotIn("不可显示", self.groups()[0]["message"])
         self.tick(30)
         self.assertEqual(len(self.executor.submitted), 1)
@@ -494,13 +611,13 @@ class FollowServiceTests(unittest.TestCase):
         self.assertEqual(self.service.snapshot()["summary"]["pending_amount_count"], 1)
         self.assertEqual(self.service.snapshot()["summary"]["confirmed_stake"], "0")
 
-    def test_success_without_ticket_is_unknown(self):
+    def test_success_without_ticket_is_rejected(self):
         self.executor.result = {"status": "SUCCEEDED", "accepted_stake": "50"}
         self.enable()
         self.add()
         self.tick(21)
-        self.assertEqual(self.groups()[0]["status"], "UNKNOWN")
-        self.assertEqual(self.service.snapshot()["rows"], [])
+        self.assertEqual(self.groups()[0]["status"], "REJECTED")
+        self.assertEqual(self.service.snapshot("SUCCEEDED")["rows"], [])
 
     def test_quote_wrong_currency_or_direction_cannot_submit(self):
         self.enable()
@@ -531,12 +648,15 @@ class FollowServiceTests(unittest.TestCase):
         self.assertEqual(self.executor.prepared[0]["side"], "HOME")
 
     def test_settled_source_blocks_frozen_group(self):
+        self.mappings.unmap("pin:101")
         self.enable()
         self.add()
         self.tick()
+        self.assertEqual(self.groups()[0]["status"], "WAIT_MAPPING")
         settled = {**self.rows[0], "status": "SETTLED"}
         self.commit([settled], "SETTLED")
-        self.tick(21)
+        self.mappings.map_events(self.ps, self.crown)
+        self.tick(3)
         self.assertEqual(self.groups()[0]["status"], "SKIPPED")
         self.assertEqual(self.executor.submitted, [])
 
@@ -573,14 +693,66 @@ class FollowServiceTests(unittest.TestCase):
             resolve_fixture(self.config["merge_db_path"], intent)["crownId"], "crown-1"
         )
 
-    def test_late_order_never_changes_completed_group(self):
+    def test_amount_below_min_stake_is_skipped(self):
+        self.enable(amount_mode="fixed", amount_value="60", min_stake=100)
+        self.add()
+        self.tick(21)
+        group = self.groups()[0]
+        self.assertEqual(group["status"], "SKIPPED")
+        self.assertIn("最低投注 100", group["message"])
+        self.assertEqual(self.executor.submitted, [])
+
+    def test_split_parts_never_go_below_min_stake(self):
+        self.enable(amount_mode="fixed", amount_value="250", min_stake=100, split_count=4)
+        self.add()
+        self.tick(21)
+        group = self.groups()[0]
+        self.assertNotEqual(group["status"], "SKIPPED")
+        parts = [item for item in group.get("split_parts") or []]
+        if parts:
+            self.assertTrue(all(float(item["stake"]) >= 100 for item in parts))
+
+    def test_account_with_enough_balance_is_preferred(self):
+        self.executor.account_ids = ["crown-small", "crown-rich", "crown-tight"]
+        self.executor.balances = {"crown-small": 0, "crown-rich": 5000, "crown-tight": 0}
         self.enable()
         self.add()
         self.tick(21)
+        self.assertEqual(self.groups()[0]["account_id"], "crown-rich")
+        self.assertEqual(len(self.executor.submitted), 1)
+
+    def test_insufficient_balance_waits_instead_of_submitting(self):
+        self.executor.account_ids = ["crown-small", "crown-tight"]
+        self.executor.balances = {"crown-small": 0, "crown-tight": 0}
+        self.enable()
+        self.add()
+        self.tick(21)
+        group = self.groups()[0]
+        self.assertEqual(group["status"], "WAIT_ACCOUNT")
+        self.assertEqual(group["error_category"], "ACCOUNT_CREDIT")
+        self.assertIn("额度不足", group["waiting_reason"])
+        self.assertEqual(self.executor.submitted, [])
+
+    def test_kickoff_time_is_not_used_when_the_mapping_is_confirmed(self):
+        # 映射已确认"这场比赛 ↔ 那场比赛"，执行期不再拿开赛时间淘汰。
+        intent = source_intent(parse_order(raw_order(), "A"))
+        for drift_hours in (-5, -1, 1, 5, 30):
+            shifted = {**intent, "event_ms": intent["event_ms"] + drift_hours * 3600 * 1000}
+            with self.subTest(drift=drift_hours):
+                self.assertEqual(
+                    resolve_fixture(self.config["merge_db_path"], shifted)["crownId"], "crown-1"
+                )
+
+    def test_late_order_never_changes_completed_group(self):
+        self.enable()
+        self.add()
+        self.tick()
         self.add("2", createdDate=1_793_600_010_000)
         self.tick()
         self.assertEqual(len(self.executor.submitted), 1)
-        self.assertEqual({group["status"] for group in self.groups()}, {"SKIPPED", "SUCCEEDED"})
+        self.assertEqual(len(self.groups()), 1)
+        self.assertEqual(self.groups()[0]["status"], "SUCCEEDED")
+        self.assertEqual(self.groups()[0]["order_count"], 1)
 
     def test_event_gap_disables_rule_without_replaying(self):
         self.enable()
@@ -618,16 +790,14 @@ class FollowServiceTests(unittest.TestCase):
         raw = raw_order("invalid")
         raw["choices"][0]["periodType"] = 9
         self.rows.append(raw)
-        self.add("valid")
-        self.tick(21)
+        self.add("valid", periodType=1)
+        self.tick()
         self.assertEqual({group["status"] for group in self.groups()}, {"SKIPPED", "SUCCEEDED"})
 
     def test_two_service_instances_claim_only_one_submission(self):
         self.enable()
         self.add()
-        self.tick()
         second = FollowService(self.config, self.executor, self.clock)
-        self.clock.now += 21
         first_preparing = threading.Event()
         release_prepare = threading.Event()
 
@@ -649,6 +819,7 @@ class FollowServiceTests(unittest.TestCase):
             threading.Thread(target=run, args=(service,)) for service in (self.service, second)
         ]
         try:
+            self.executor.on_prepare = prepared
             threads[0].start()
             self.assertTrue(first_preparing.wait(timeout=3))
             threads[1].start()
@@ -667,25 +838,26 @@ class FollowServiceTests(unittest.TestCase):
             second.stop()
 
     def test_stale_status_cannot_replace_updated_group_amount(self):
+        self.mappings.unmap("pin:101")
         self.enable(amount_mode="ratio", amount_value="10")
         self.add("1", stake="100")
         self.tick()
+        self.assertEqual(self.groups()[0]["status"], "WAIT_MAPPING")
         with self.service.store.connect() as connection:
             stale = self.service.store.active_groups(connection)[0]
-        self.clock.now += 5
-        self.add("2", stake="500")
-        self.tick()
-        self.assertFalse(self.service._set_status(stale, "READY", "旧快照已过期"))
+        stale_snapshot = copy.deepcopy(stale)
+        self.service._set_status(stale, "WAIT_MAPPING", "赛事映射仍未恢复")
+        self.assertFalse(self.service._set_status(stale_snapshot, "READY", "旧快照已过期"))
         group = self.groups()[0]
-        self.assertEqual((group["source_stake"], group["order_count"]), ("600", 2))
+        self.assertEqual((group["source_stake"], group["order_count"]), ("100", 1))
         self.assertNotIn("_revision", group)
         with self.service.store.connect() as connection:
             with self.assertRaisesRegex(RuntimeError, "旧快照"):
-                self.service.store.save_group(connection, stale)
-        self.tick(16)
-        self.assertEqual(self.executor.submitted[0][1], "60")
+                self.service.store.save_group(connection, stale_snapshot)
+        self.assertEqual(self.executor.submitted, [])
 
     def test_status_read_and_update_exclude_competing_claim(self):
+        self.mappings.unmap("pin:101")
         self.enable()
         self.add()
         self.tick()
@@ -762,7 +934,7 @@ class FollowServiceTests(unittest.TestCase):
         def recover_while_request_inflight(quote, stake, account_id):
             with patch.object(store, "save_group", side_effect=recover_save):
                 store.recover_inflight(self.clock())
-            self.assertEqual(self.groups()[0]["status"], "UNKNOWN")
+            self.assertEqual(self.groups()[0]["status"], "REJECTED")
             return {"status": "SUCCEEDED", "receipt_id": "LATE-TICKET"}
 
         with patch.object(self.executor, "submit", side_effect=recover_while_request_inflight):
@@ -791,7 +963,9 @@ class FollowServiceTests(unittest.TestCase):
                 self.tick()
             with self.service.store.connect() as connection:
                 self.assertEqual(self.service.store.meta(connection, "cursor"), 2)
+            self.assertEqual(len(self.groups()), 1)
             self.assertEqual(self.groups()[0]["order_count"], 2)
+            self.assertEqual(len(self.executor.submitted), 1)
         finally:
             second.stop()
 
@@ -833,10 +1007,10 @@ class FollowServiceTests(unittest.TestCase):
         self.add()
         self.tick()
         with self.service.store.connect() as connection:
-            group = self.service.store.active_groups(connection)[0]
+            group = self.service.store.get_group(connection, self.groups()[0]["id"])
             group.update(status="SUCCEEDED", receipt_id=None)
             self.service.store.save_group(connection, group)
-        result = self.service.snapshot()
+        result = self.service.snapshot("SUCCEEDED")
         self.assertEqual(result["rows"], [])
         self.assertEqual(result["summary"]["succeeded"], 0)
         self.assertEqual(result["summary"]["unknown"], 1)

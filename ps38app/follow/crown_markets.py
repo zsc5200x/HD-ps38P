@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 LIMIT = 8 * 1024 * 1024
@@ -48,6 +47,14 @@ def line_number(value):
     if number * 4 != (number * 4).to_integral_value():
         raise ValueError("皇冠盘口不是四分之一单位")
     return number
+
+
+def optional_score(home, away=None):
+    """盘口行不一定回显比分；解析不了就返回 None，交给确认接口核对。"""
+    try:
+        return score_text(home, away)
+    except ValueError:
+        return None
 
 
 def encode_line(value, *, market_type, side):
@@ -137,16 +144,6 @@ def score_text(home, away=None):
     return f"{int(match[1])}:{int(match[2])}"
 
 
-def timestamp(value, offset_minutes=-240):
-    try:
-        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        raise ValueError("皇冠赛事缺少有效开赛时间") from None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone(timedelta(minutes=offset_minutes)))
-    return stamp.timestamp()
-
-
 def mapped_game(mapping):
     """Build the live-query identity from a confirmed Crown fixture snapshot."""
     snapshot = mapping.get("crownSnapshot") or {}
@@ -170,65 +167,69 @@ def mapped_game(mapping):
     }
 
 
-def resolve_game(rows, mapping, intent, *, offset_minutes=-240):
-    snapshot = mapping.get("crownSnapshot") or {}
-    crown_id = str(mapping.get("crownId") or "")
-    lid = str(snapshot.get("providerLeagueId") or snapshot.get("leagueId") or "")
-    home_id = str(snapshot.get("homeId") or "")
-    away_id = str(snapshot.get("awayId") or "")
-    expected_time = timestamp(snapshot.get("kickoffUtc"), offset_minutes)
-    if not crown_id or not lid or not snapshot.get("home") or not snapshot.get("away"):
-        raise FollowPreparationError("已合并赛事的皇冠身份不完整", "IDENTITY_INCOMPLETE")
-    candidates = []
-    for row in rows:
-        if row.get("lid") != lid:
-            continue
-        if home_id and away_id:
-            if row.get("team_h_id") != home_id or row.get("team_c_id") != away_id:
-                continue
-        elif row.get("gid") != crown_id:
-            continue
-        if row.get("team_h") != snapshot["home"] or row.get("team_c") != snapshot["away"]:
-            continue
-        if abs(timestamp(row.get("game_date_time"), offset_minutes) - expected_time) > 60:
-            continue
-        if row.get("is_finished", "").lower() in {"1", "true", "y"}:
-            continue
-        if re.search(
-            r"角球|corner",
-            " ".join(row.get(key, "") for key in ("league", "team_h", "team_c")),
-            re.I,
-        ):
-            continue
-        if not all(row.get(key) for key in ("gid", "ecid", "team_h_id", "team_c_id")):
-            continue
-        candidates.append(row)
-    if len(candidates) != 1:
-        raise FollowPreparationError(
-            "皇冠比赛未唯一匹配，请刷新已合并赛事",
-            "MARKET_UNAVAILABLE" if not candidates else "IDENTITY_CONFLICT",
-            retryable=not candidates,
-        )
-    game = candidates[0]
-    if score_text(game.get("score_h"), game.get("score_c")) != score_text(intent.get("score")):
-        raise FollowPreparationError("皇冠当前比分与原单比分不同", "SCORE_CHANGED")
-    return game
+def market_fields(market_type, *, half=False, live=True):
+    """返回皇冠盘口字段名：赛前与滚球的字段编码不同。"""
+    if market_type == "HANDICAP":
+        if live:
+            wtype = "HRE" if half else "RE"
+            return {
+                "wtype": wtype,
+                "sw": f"sw_{wtype.lower()}",
+                "line": f"ratio_{wtype.lower()}",
+                "strong": "hstrong" if half else "strong",
+                "odds_h": f"ior_{wtype.lower()}h",
+                "odds_c": f"ior_{wtype.lower()}c",
+            }
+        wtype = "HR" if half else "R"
+        return {
+            "wtype": wtype,
+            "sw": f"sw_{wtype.lower()}",
+            "line": "hratio" if half else "ratio",
+            "strong": "strong",
+            "odds_h": f"ior_{wtype.lower()}h",
+            "odds_c": f"ior_{wtype.lower()}c",
+        }
+    if live:
+        wtype = "HROU" if half else "ROU"
+        base = wtype.lower()
+        return {
+            "wtype": wtype,
+            "sw": f"sw_{base}",
+            "line_o": f"ratio_{base}o",
+            "line_u": f"ratio_{base}u",
+            "odds_h": f"ior_{base}h",
+            "odds_c": f"ior_{base}c",
+        }
+    wtype = "HOU" if half else "OU"
+    base = wtype.lower()
+    return {
+        "wtype": wtype,
+        "sw": f"sw_{base}",
+        # 赛前大小盘线在 ratio_o / ratio_u（半场 ratio_ho / ratio_hu）。
+        "line_o": f"ratio_{'h' if half else ''}o",
+        "line_u": f"ratio_{'h' if half else ''}u",
+        "odds_h": f"ior_{base}h",
+        "odds_c": f"ior_{base}c",
+    }
 
 
 def select_market(rows, game, intent):
-    if intent.get("is_live") is not True or intent.get("period") not in {"FT", "HT"}:
-        raise ValueError("首版仅支持滚球足球全场和上半场")
+    if intent.get("period") not in {"FT", "HT"}:
+        raise ValueError("仅支持足球全场和上半场")
     market_type, side = intent.get("market_type"), intent.get("side")
     valid_sides = {"HANDICAP": {"HOME", "AWAY"}, "TOTAL": {"OVER", "UNDER"}}
     if side not in valid_sides.get(market_type, set()):
         raise ValueError("首版仅支持让球和大小盘口")
     half = intent["period"] == "HT"
-    wtype = ("HRE" if half else "RE") if market_type == "HANDICAP" else ("HROU" if half else "ROU")
+    live = intent.get("is_live") is True
+    fields = market_fields(market_type, half=half, live=live)
+    wtype = fields["wtype"]
     choice = {"HOME": "H", "AWAY": "C", "OVER": "C", "UNDER": "H"}[side]
     wanted = line_number(intent["line"])
     matches = []
+    score_changed = 0
     for row in rows:
-        if row.get("mode", "").upper() != "FT" or row.get(f"sw_{wtype.lower()}") != "Y":
+        if row.get("mode", "").upper() != "FT" or row.get(fields["sw"]) != "Y":
             continue
         # 皇冠同一行的全场／半场可能有不同盘口 ID；半场缺省兼容同 ID，仍须确认上下文。
         gid = (row.get("hgid") or row.get("gid")) if half else row.get("gid")
@@ -240,27 +241,25 @@ def select_market(rows, game, intent):
             for key in ("ecid", "lid", "team_h_id", "team_c_id", "team_h", "team_c")
         ):
             continue
-        if any(key in row for key in ("score_h", "score_c")):
-            if score_text(row.get("score_h"), row.get("score_c")) != score_text(intent["score"]):
-                continue
+        row_score = optional_score(row.get("score_h"), row.get("score_c"))
+        if row_score is not None and row_score != score_text(intent["score"]):
+            score_changed += 1
+            continue
         try:
             if market_type == "HANDICAP":
-                magnitude = abs(line_number(row.get(f"ratio_{wtype.lower()}")))
-                strong = row.get("hstrong" if half else "strong", "").upper()
+                magnitude = abs(line_number(row.get(fields["line"])))
+                strong = row.get(fields["strong"], "").upper()
                 if magnitude and strong not in {"H", "C"}:
                     continue
                 actual = -magnitude if choice == strong else magnitude
             else:
                 suffix = "o" if side == "OVER" else "u"
-                raw = row.get(f"ratio_{wtype.lower()}{suffix}")
-                if raw is None:
-                    raw = row.get(f"ratio_{wtype.lower()}o")
-                actual = line_number(raw)
+                actual = line_number(row.get(fields[f"line_{suffix}"]))
                 if actual < 0:
                     continue
             if actual != wanted:
                 continue
-            odd = decimal(row.get(f"ior_{wtype.lower()}{choice.lower()}"), positive=True)
+            odd = decimal(row.get(fields[f"odds_{choice.lower()}"]), positive=True)
         except ValueError:
             continue
         con, ratio = encode_line(actual, market_type=market_type, side=side)
@@ -280,12 +279,15 @@ def select_market(rows, game, intent):
                 "ratio": ratio,
                 "odds": text_number(odd),
                 "odds_format": "HK",
-                "score": score_text(intent["score"]),
+                "score": score_text(intent["score"]) if intent.get("score") else "",
                 "home": game["team_h"],
                 "away": game["team_c"],
             }
         )
     if len(matches) != 1:
+        if not matches and score_changed:
+            # 比分已经变了：这注的语义不再成立，必须停止而不是反复重查。
+            raise FollowPreparationError("比分已变化，停止跟单", "SCORE_CHANGED", retryable=False)
         raise FollowPreparationError(
             "目标盘口缺失、封盘或存在多个匹配",
             "MARKET_UNAVAILABLE" if not matches else "MARKET_AMBIGUOUS",
@@ -307,7 +309,8 @@ def verify_context(body, quote):
         "con": fields.get("con") if fields.get("con") is not None else fields.get("concede"),
         "ratio": fields.get("ratio"),
     }
-    if checks["rtype"] != quote["rtype"] or any(
+    rtype_ok = checks["rtype"] is None or checks["rtype"] == quote["rtype"]
+    if not rtype_ok or any(
         decimal(checks[key]) != decimal(quote[key]) for key in ("con", "ratio")
     ):
         raise FollowPreparationError("皇冠确认盘口已发生变化", "MARKET_CHANGED", retryable=True)
@@ -331,9 +334,11 @@ def verify_context(body, quote):
         re.I,
     ):
         raise ValueError("皇冠确认返回了不同比赛类别")
-    if any(key in fields for key in ("score_h", "score_c")):
-        if score_text(fields.get("score_h"), fields.get("score_c")) != quote["score"]:
-            raise ValueError("皇冠确认时比分已变化")
+    confirmed_score = optional_score(fields.get("score")) or optional_score(
+        fields.get("score_h"), fields.get("score_c")
+    )
+    if confirmed_score is not None and confirmed_score != quote["score"]:
+        raise ValueError("皇冠确认时比分已变化")
     confirmed = {**quote, "odds": text_number(decimal(fields.get("ioratio"), positive=True))}
     for field, key in (("gold_gmin", "min_stake"), ("gold_gmax", "max_stake")):
         if field in fields:
@@ -347,6 +352,66 @@ def verify_context(body, quote):
     return confirmed
 
 
+
+# 皇冠 FT_bet 错误码 → (中文提示, 分类, 是否可重试)
+# 分类：MARKET_REJECTED=盘口问题可重查；ACCOUNT_CREDIT=账号额度问题换号；
+#       AMOUNT_REJECTED=金额/限额问题；PLATFORM_REJECTED=不可重试的明确拒绝。
+CROWN_ERRORS = {
+    # 网站/系统类：换号 + 换域名重试，最多 3 次
+    "0X001": ("网站流量较高，请重试", "retry_system"),
+    "0X003": ("系统忙碌中，请稍后再试", "retry_system"),
+    "0X006": ("系统正在优化中，请稍候", "stop"),
+    # 盘口类
+    "1X000": ("此选项不再开放投注，请从交易单移除", "stop"),
+    "1X001": ("此选项目前不开放投注（盘口封盘）", "wait_1x001"),
+    "1X002": ("已超过停止交易时间", "stop"),
+    "1X003": ("本场已转至走地盘口", "stop"),
+    "1X004": ("最小投注金额为 100", "stop"),
+    "1X005": ("让球数、赔率或比分已更新", "retry_market_90"),
+    "1X006": ("让球数、赔率或比分已更新", "retry_market_90"),
+    "1X008": ("交易金额超过股东单场总信用额度", "switch_account"),
+    "1X009": ("暂时停止交易", "retry_market_90"),
+    "1X010": ("暂时停止交易", "retry_market_90"),
+    "1X011": ("此选项不再开放投注，请从交易单移除", "retry_market_90"),
+    "1X012": ("您的总投注金额已超过余额", "switch_account"),
+    "1X013": ("赔率错误，请重新交易", "retry_market_90"),
+    "1X015": ("让球数、赔率或比分已更新", "retry_market_90"),
+    "1X016": ("让球数、赔率或比分已更新", "retry_market_90"),
+    "1X017": ("已超过该场次过关投注限额", "switch_account"),
+    "1X019": ("同一组合可赢金额超过上限", "stop"),
+    "1X020": ("单注最高可赢金额超过上限", "split_half"),
+    "1X026": ("所选赛程跨天，无法过关", "stop"),
+    "1X032": ("综合过关选项不足", "stop"),
+    # 回执类（不带 XML 错误码时也会出现）
+    "order_failed": ("投注失败", "retry_3x10"),
+    "connectfail": ("系统目前无法回应，请稍后再试", "stop"),
+    "bet_pending": ("注单正在处理中，请稍候", "pending"),
+    "bet_rejected": ("您的注单已被拒收", "stop"),
+    "user_stop": ("您的账户已被停用，请联系上线", "disable_account"),
+    "user_forbid": ("您的账户已被禁止登录，请联系上线", "disable_account"),
+}
+
+# 这些动作在重试后仍可能成功；其余一律终态。
+RETRYABLE_ACTIONS = {
+    "retry_system",
+    "wait_1x001",
+    "retry_market_90",
+    "switch_account",
+    "split_half",
+    "retry_3x10",
+    "pending",
+    "disable_account",
+}
+
+
+def describe_crown_error(code):
+    """把皇冠错误码翻成 (中文, 动作)；未知码返回空。"""
+    entry = CROWN_ERRORS.get(str(code or "").strip())
+    if entry is None:
+        entry = CROWN_ERRORS.get(str(code or "").strip().lower())
+    return entry
+
+
 def parse_receipt(body):
     """仅返回明确的业务回执；没有回显的金额和水位保持为空。"""
     try:
@@ -354,7 +419,7 @@ def parse_receipt(body):
     except ValueError:
         return {
             "status": "UNKNOWN",
-            "message": "提交响应无法识别，等待核对",
+            "message": "提交响应无法识别，按失败处理",
             "category": "UNRECOGNIZED_RESPONSE",
             "error_code": "UNRECOGNIZED_RESPONSE",
             "retryable": False,
@@ -362,6 +427,19 @@ def parse_receipt(body):
         }
     code = fields.get("code", "")
     ticket = fields.get("ticket_id") or fields.get("ticketid") or ""
+    lowered_code = str(code).strip().lower()
+    lowered_error = str(fields.get("errormsg") or "").strip().lower()
+    # 被拒收的注单可能带票号，必须最先判失败，绝不能当成功。
+    if lowered_code == "bet_rejected" or lowered_error == "bet_rejected":
+        return {
+            "status": "REJECTED",
+            "message": "您的注单已被拒收",
+            "category": "PLATFORM_REJECTED",
+            "error_code": "bet_rejected",
+            "action": "stop",
+            "retryable": False,
+            "request_sent": True,
+        }
     if (
         code == "560"
         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", ticket)
@@ -370,6 +448,7 @@ def parse_receipt(body):
         result = {
             "status": "SUCCEEDED",
             "receipt_id": ticket,
+            "action": "success",
             "accepted_stake": None,
             "accepted_odds": None,
             "message": "皇冠已返回成功回执",
@@ -391,7 +470,7 @@ def parse_receipt(body):
     if ticket or code == "560":
         return {
             "status": "UNKNOWN",
-            "message": "提交回执字段不一致，等待核对",
+            "message": "提交回执字段不一致，按失败处理",
             "category": "INCONSISTENT_RECEIPT",
             "error_code": "INCONSISTENT_RECEIPT",
             "retryable": False,
@@ -403,27 +482,54 @@ def parse_receipt(body):
         or fields.get("errormsg")
     ):
         raw_error = fields.get("errormsg", "")
-        error_code = raw_error if re.fullmatch(r"1X\d{3}", raw_error) else "PLATFORM_REJECTED"
+        # 已知错误码：翻成中文，并给出后续动作。
+        described = describe_crown_error(raw_error) or describe_crown_error(code)
+        if described:
+            label, action = described
+            return {
+                "status": "REJECTED",
+                "message": label,
+                "category": "MARKET_REJECTED" if action != "switch_account" else "ACCOUNT_CREDIT",
+                "error_code": raw_error or code,
+                "action": action,
+                "retryable": action in RETRYABLE_ACTIONS,
+                "request_sent": True,
+            }
         session_error = code.lower() == "error" and fields.get("msg", "").lower() == "doublelogin"
-        retryable = raw_error in {"1X001", "1X003", "1X015", "1X016"} or session_error
+        # betError* 是盘口/金额类的临时拒绝：换最新盘口可以再试（对齐参考项目）。
+        market_error = raw_error in {"1X001", "1X003", "1X015", "1X016"} or raw_error.startswith(
+            "betError"
+        )
+        # 555 且没有具体错误码时是会员侧问题，换一个会员可以再试。
+        member_error = code == "555" and not raw_error
+        retryable = market_error or session_error or member_error
         category = (
             "ACCOUNT_SESSION"
-            if session_error
+            if session_error or member_error
             else "MARKET_REJECTED"
-            if retryable
+            if market_error
+            else "PLATFORM_REJECTED"
+        )
+        error_code = (
+            "doubleLogin"
+            if session_error
+            else raw_error[:60]
+            if raw_error
             else "PLATFORM_REJECTED"
         )
         return {
             "status": "REJECTED",
-            "message": "皇冠明确拒绝本次请求，请检查账号或盘口",
+            "message": "皇冠明确拒绝本次请求，将重新查盘再试"
+            if retryable
+            else "皇冠明确拒绝本次请求，请检查账号或盘口",
             "category": category,
-            "error_code": "doubleLogin" if session_error else error_code,
+            "error_code": error_code,
             "retryable": retryable,
             "request_sent": True,
         }
     return {
         "status": "UNKNOWN",
-        "message": "提交结果不明确，等待核对",
+        "message": "提交结果不明确，按失败处理",
         "category": "UNCERTAIN_RESULT",
         "error_code": "UNCERTAIN_RESULT",
         "retryable": False,

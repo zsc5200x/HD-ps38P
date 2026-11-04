@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Sequence
 from urllib.parse import urlsplit
 
 from . import store as order_store
@@ -859,6 +859,61 @@ class FixtureMergeStore:
             for row in rows
         ]
 
+    def backfill_crown_identity(self, crown_events: Sequence[Dict[str, Any]]) -> int:
+        """把当前皇冠赛事里的 ecid / 队 ID 补进缺字段的旧映射。
+
+        老版本绑定只存了 gid + 队名，没有 ecid 和球队 ID，跟单只能退回
+        “拉整份滚球列表”的兜底路径，而滚球列表并不返回开赛时间。这里在每次
+        拉取赛事后用同一个 GID 把缺失身份补全，幂等且不会凭空猜测。
+        """
+        by_id = {
+            str(event.get("id")): event
+            for event in crown_events
+            if event.get("ecid") and event.get("homeId") and event.get("awayId")
+        }
+        if not by_id:
+            return 0
+        updated = 0
+        now = self._now()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT crown_event_id, crown_snapshot FROM fixture_mappings"
+            ).fetchall()
+            for row in rows:
+                try:
+                    snapshot = json.loads(row["crown_snapshot"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(snapshot, dict):
+                    continue
+                if snapshot.get("ecid") and snapshot.get("homeId") and snapshot.get("awayId"):
+                    continue
+                live = by_id.get(str(row["crown_event_id"]))
+                if live is None:
+                    continue
+                merged = {**live, **snapshot}
+                merged.update({
+                    "ecid": live["ecid"],
+                    "homeId": live["homeId"],
+                    "awayId": live["awayId"],
+                    "providerLeagueId": (
+                        snapshot.get("providerLeagueId")
+                        or live.get("providerLeagueId")
+                        or live.get("leagueId")
+                        or ""
+                    ),
+                    "leagueId": snapshot.get("leagueId") or live.get("leagueId") or "",
+                })
+                if not merged.get("kickoffUtc"):
+                    merged["kickoffUtc"] = live.get("kickoffUtc") or ""
+                connection.execute(
+                    "UPDATE fixture_mappings SET crown_snapshot=?, updated_at=? "
+                    "WHERE crown_event_id=?",
+                    (json.dumps(merged, ensure_ascii=False), now, row["crown_event_id"]),
+                )
+                updated += 1
+        return updated
+
     def map_leagues(self, ps_league: Dict[str, Any], crown_league: Dict[str, Any]) -> Dict[str, Any]:
         ps_id = str(ps_league["id"])
         crown_id = str(crown_league["id"])
@@ -1466,6 +1521,12 @@ class MergeService:
         crown_events = [
             prepare_crown_event(event, self.offset_minutes, now) for event in crown_raw
         ]
+        if crown_events:
+            # 旧映射缺 ecid/队 ID 时自动补全，跟单才能直接查单场盘口。
+            try:
+                self.store.backfill_crown_identity(crown_events)
+            except (sqlite3.Error, ValueError):
+                pass
         ps_events = self._current_events(ps_events, now)
         crown_events = self._current_events(crown_events, now)
         league_mappings = self.store.list_league_mappings()

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from ps38app.account_pool.crown_member import cookie_header, ping_member
+from ps38app.account_pool.crown_member import cookie_header, ping_member, preferred_origin
 from ps38app.account_pool.providers import CheckResult, CrownProvider, LoginResult
 from ps38app.account_pool.service import AccountPoolService
 from ps38app.account_pool.store import AccountStore, PRIMARY_ID
@@ -25,6 +25,7 @@ def pool_config(root: Path):
         "profile_dir": root / "profile",
         "pool_db_path": root / "accounts.sqlite3",
         "pool_dir": root / "accounts",
+        "monitor_db_path": root / "monitor.sqlite3",
         "pool_check_interval_seconds": 60,
         "pool_login_timeout_seconds": 60,
         "pool_check_timeout_seconds": 5,
@@ -48,15 +49,17 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn("password", json.dumps(accounts, ensure_ascii=False).lower())
 
     def test_create_update_clear_and_delete(self):
-        account = self.store.save_account({
-            "platform": "crown_member",
-            "name": "皇冠会员 A",
-            "base_url": "https://member.example.com/",
-            "login_path": "/",
-            "username": "summer001",
-            "password": "secret-pass",
-            "check_interval": 120,
-        })
+        account = self.store.save_account(
+            {
+                "platform": "crown_member",
+                "name": "皇冠会员 A",
+                "base_url": "https://member.example.com/",
+                "login_path": "/",
+                "username": "summer001",
+                "password": "secret-pass",
+                "check_interval": 120,
+            }
+        )
         self.assertEqual(account["platform_label"], "皇冠会员")
         self.assertTrue(account["has_credentials"])
         self.assertTrue(self.store.paths(account["id"])["credentials"].is_file())
@@ -97,18 +100,26 @@ class StoreTests(unittest.TestCase):
             self.store.delete_account(PRIMARY_ID)
 
     def test_public_balance_snapshot_is_validated_and_session_meta_stays_private(self):
-        account = self.store.save_account({
-            "platform": "crown_member",
-            "name": "会员 A",
-            "base_url": "https://member.example.com",
-            "login_path": "/",
-            "username": "u1",
-        })
-        self.store.save_meta(account["id"], {
-            "uid": "private-uid", "ver": "private-ver", "balance": "2,500.25",
-            "balance_currency": "CNY", "balance_checked_at": "2026-11-04T10:00:00+08:00",
-            "password": "must-not-leak",
-        })
+        account = self.store.save_account(
+            {
+                "platform": "crown_member",
+                "name": "会员 A",
+                "base_url": "https://member.example.com",
+                "login_path": "/",
+                "username": "u1",
+            }
+        )
+        self.store.save_meta(
+            account["id"],
+            {
+                "uid": "private-uid",
+                "ver": "private-ver",
+                "balance": "2,500.25",
+                "balance_currency": "CNY",
+                "balance_checked_at": "2026-11-04T10:00:00+08:00",
+                "password": "must-not-leak",
+            },
+        )
         public = self.store.get(account["id"])
         self.assertEqual(public["balance"], "2500.25")
         self.assertEqual(public["balance_currency"], "CNY")
@@ -124,14 +135,52 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(unknown["balance_currency"], "")
 
 
+class PreferredOriginTests(unittest.TestCase):
+    def state(self, domains):
+        return {
+            "cookies": [{"name": "cu", "value": "1", "domain": d, "path": "/"} for d in domains],
+            "origins": [],
+        }
+
+    def test_domain_entry_wins_over_the_redirected_ip(self):
+        meta = {"origin": "https://64.188.47.32"}
+        state = self.state([".hga038.com", "64.188.47.32"])
+        self.assertEqual(preferred_origin(meta, state, "https://hga038.com"), "https://hga038.com")
+
+    def test_ip_entry_is_kept_when_no_domain_is_registered(self):
+        meta = {"origin": "https://64.188.47.32"}
+        state = self.state(["64.188.47.32"])
+        self.assertEqual(
+            preferred_origin(meta, state, "https://64.188.47.32"), "https://64.188.47.32"
+        )
+
+    def test_domain_without_matching_cookie_falls_back(self):
+        meta = {"origin": "https://64.188.47.32"}
+        state = self.state(["64.188.47.32"])
+        self.assertEqual(
+            preferred_origin(meta, state, "https://hga038.com"), "https://64.188.47.32"
+        )
+
+
 class CrownMemberHeartbeatTests(unittest.TestCase):
     def test_online_response(self):
-        xml = (b"<serverresponse><code></code><msg></msg><enable>1</enable>"
-               b"<currency>CNY</currency><maxcredit>1000</maxcredit></serverresponse>")
+        xml = (
+            b"<serverresponse><code></code><msg></msg><enable>1</enable>"
+            b"<currency>CNY</currency><maxcredit>1000</maxcredit></serverresponse>"
+        )
         result = ping_member(
             "https://member.example.com",
-            {"cookies": [{"name": "sid", "value": "abc", "domain": "member.example.com",
-                          "path": "/", "expires": -1}]},
+            {
+                "cookies": [
+                    {
+                        "name": "sid",
+                        "value": "abc",
+                        "domain": "member.example.com",
+                        "path": "/",
+                        "expires": -1,
+                    }
+                ]
+            },
             {"uid": "u1", "ver": "v1", "langx": "zh-cn", "origin": "https://member.example.com"},
             transport=lambda url, form, headers, timeout: (200, xml),
         )
@@ -141,19 +190,38 @@ class CrownMemberHeartbeatTests(unittest.TestCase):
         self.assertTrue(result["balance_checked_at"])
 
     def test_balance_uses_hdproc_field_priority_and_reports_unknown_values(self):
-        storage = {"cookies": [{"name": "sid", "value": "abc",
-                                 "domain": "member.example.com", "path": "/", "expires": -1}]}
+        storage = {
+            "cookies": [
+                {
+                    "name": "sid",
+                    "value": "abc",
+                    "domain": "member.example.com",
+                    "path": "/",
+                    "expires": -1,
+                }
+            ]
+        }
         meta = {"uid": "u1", "ver": "v1", "origin": "https://member.example.com"}
 
         def ping(fields):
-            xml = "<serverresponse><enable>1</enable><currency>RMB</currency>" + fields + "</serverresponse>"
+            xml = (
+                "<serverresponse><enable>1</enable><currency>RMB</currency>"
+                + fields
+                + "</serverresponse>"
+            )
             return ping_member(
-                "https://member.example.com", storage, meta,
+                "https://member.example.com",
+                storage,
+                meta,
                 transport=lambda url, form, headers, timeout: (200, xml.encode()),
             )
 
-        self.assertEqual(ping("<maxcredit>1,200.50</maxcredit><nowcredit>900</nowcredit><cash>800</cash>")
-                         ["balance"], "1200.50")
+        self.assertEqual(
+            ping("<maxcredit>1,200.50</maxcredit><nowcredit>900</nowcredit><cash>800</cash>")[
+                "balance"
+            ],
+            "1200.50",
+        )
         self.assertEqual(ping("<nowcredit>900</nowcredit><cash>800</cash>")["balance"], "900")
         self.assertEqual(ping("<cash>800</cash>")["balance"], "800")
         for raw in ("NaN", "Infinity", "-1", "not-a-number"):
@@ -167,22 +235,31 @@ class CrownMemberHeartbeatTests(unittest.TestCase):
             root = Path(temporary)
             config = pool_config(root)
             store = AccountStore(config["pool_db_path"], config)
-            account = store.save_account({
-                "platform": "crown_member",
-                "name": "测试会员",
-                "base_url": "https://member.example.com",
-                "login_path": "/",
-                "username": "u1",
-            })
+            account = store.save_account(
+                {
+                    "platform": "crown_member",
+                    "name": "测试会员",
+                    "base_url": "https://member.example.com",
+                    "login_path": "/",
+                    "username": "u1",
+                }
+            )
             store.save_meta(account["id"], {"uid": "u1", "ver": "v1"})
             storage = store.paths(account["id"])["storage"]
             storage.parent.mkdir(parents=True, exist_ok=True)
             storage.write_text("{}", encoding="utf-8")
             provider = CrownProvider(config, store, "crown_member")
-            with mock.patch.object(provider, "_member_ping", return_value={
-                "status": "online", "message": "ok", "balance": "750",
-                "balance_currency": "CNY", "balance_checked_at": "2026-11-04T10:01:00+08:00",
-            }):
+            with mock.patch.object(
+                provider,
+                "_member_ping",
+                return_value={
+                    "status": "online",
+                    "message": "ok",
+                    "balance": "750",
+                    "balance_currency": "CNY",
+                    "balance_checked_at": "2026-11-04T10:01:00+08:00",
+                },
+            ):
                 result = provider.check(account)
             self.assertEqual(result.status, "online")
             self.assertEqual(result.meta["balance"], "750")
@@ -193,19 +270,39 @@ class CrownMemberHeartbeatTests(unittest.TestCase):
         xml = b"<serverresponse><code>error</code><msg>doublelogin</msg></serverresponse>"
         result = ping_member(
             "https://member.example.com",
-            {"cookies": [{"name": "sid", "value": "abc", "domain": "member.example.com",
-                          "path": "/", "expires": -1}]},
+            {
+                "cookies": [
+                    {
+                        "name": "sid",
+                        "value": "abc",
+                        "domain": "member.example.com",
+                        "path": "/",
+                        "expires": -1,
+                    }
+                ]
+            },
             {"uid": "u1", "ver": "v1", "origin": "https://member.example.com"},
             transport=lambda url, form, headers, timeout: (200, xml),
         )
         self.assertEqual(result["status"], "conflict")
 
     def test_cookie_header_filters_expired_and_foreign_cookies(self):
-        header = cookie_header({"cookies": [
-            {"name": "a", "value": "1", "domain": ".example.com", "path": "/", "expires": -1},
-            {"name": "b", "value": "2", "domain": "other.com", "path": "/", "expires": -1},
-            {"name": "c", "value": "3", "domain": "example.com", "path": "/", "expires": 1},
-        ]}, "https://member.example.com")
+        header = cookie_header(
+            {
+                "cookies": [
+                    {
+                        "name": "a",
+                        "value": "1",
+                        "domain": ".example.com",
+                        "path": "/",
+                        "expires": -1,
+                    },
+                    {"name": "b", "value": "2", "domain": "other.com", "path": "/", "expires": -1},
+                    {"name": "c", "value": "3", "domain": "example.com", "path": "/", "expires": 1},
+                ]
+            },
+            "https://member.example.com",
+        )
         self.assertEqual(header, "a=1")
 
 
@@ -231,13 +328,15 @@ class ServiceTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.config = pool_config(self.root)
         self.service = AccountPoolService(self.config, collector=None)
-        self.account = self.service.store.save_account({
-            "platform": "crown_member",
-            "name": "会员 A",
-            "base_url": "https://member.example.com",
-            "login_path": "/",
-            "username": "u1",
-        })
+        self.account = self.service.store.save_account(
+            {
+                "platform": "crown_member",
+                "name": "会员 A",
+                "base_url": "https://member.example.com",
+                "login_path": "/",
+                "username": "u1",
+            }
+        )
 
     def tearDown(self):
         self.service.stop()

@@ -337,6 +337,17 @@ class AccountStore:
 
     # ── mutations ─────────────────────────────────────────────────────────
 
+    def set_base_url(self, account_id: str, base_url: str) -> None:
+        """更新账号站点地址（皇冠会员自动选择延迟最低的入口时使用）。"""
+        value = _normalize_url(base_url)
+        if not value:
+            raise ValueError("站点地址无效")
+        with self._lock, self._db() as db:
+            db.execute(
+                "UPDATE accounts SET base_url=?, updated_at=? WHERE id=?",
+                (value, now_iso(), account_id),
+            )
+
     def save_account(self, payload: Dict[str, Any], account_id: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             old = None

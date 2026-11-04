@@ -834,6 +834,59 @@ function copyOddsText(group) {
   return `${formatOdds(min)}–${formatOdds(max)}`;
 }
 
+function buildCopySourceTable(rows) {
+  const table = document.createElement("table");
+  table.className = "follow-source-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of [
+    "联赛", "主队 vs 客队", "比分", "盘口", "水位", "金额", "订单号", "代理", "会员",
+  ]) {
+    headRow.append(el("th", "", label));
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  const ordered = [...rows].sort(
+    (a, b) => (Number(a.created_ms) || 0) - (Number(b.created_ms) || 0),
+  );
+  for (const row of ordered) {
+    const tr = document.createElement("tr");
+    tr.append(
+      cell(row.league || "—", "league"),
+      cell(formatTeams(row.teams) || "—", "teams"),
+      cell(row.score || "—", "score"),
+      cell(formatPickWithPeriod(row) || "—", "market"),
+      cell(row.odds == null ? "—" : formatOdds(row.odds), "odds"),
+      cell(formatMoney(row.stake), "stake"),
+      cell(row.order_id || "—", "order"),
+      cell(row.agent || "—", "agent"),
+      cell(row.member || "—", "member"),
+    );
+    body.append(tr);
+  }
+  table.append(body);
+  return table;
+}
+
+function toggleCopySources(mainRow, rows) {
+  const next = mainRow.nextElementSibling;
+  if (next && next.classList.contains("follow-sources")) {
+    next.hidden = !next.hidden;
+    mainRow.classList.toggle("expanded", !next.hidden);
+    return;
+  }
+  const tr = document.createElement("tr");
+  tr.className = "follow-sources";
+  const td = document.createElement("td");
+  td.className = "follow-sources-cell";
+  td.colSpan = 11;
+  td.append(buildCopySourceTable(rows));
+  tr.append(td);
+  mainRow.after(tr);
+  mainRow.classList.add("expanded");
+}
+
 function renderCopyGroups() {
   const body = $("myEventsCopyBody");
   if (!body) return;
@@ -842,10 +895,17 @@ function renderCopyGroups() {
   for (const group of current.copy) {
     const tr = document.createElement("tr");
     tr.className = "my-events-copy-row";
+    const sources = Array.isArray(group.sources) ? group.sources : [];
+    const timeCell = cell(formatClock(group.start_ms, current.tz), "time");
+    if (sources.length) {
+      timeCell.prepend(el("span", "follow-caret", "▸"));
+      tr.classList.add("follow-row");
+      tr.title = `点击查看这笔合并单包含的 ${sources.length} 笔源单`;
+      tr.addEventListener("click", () => toggleCopySources(tr, sources));
+    }
     const teamsCell = cell(formatTeams(group.teams) || "—", "teams");
-    if (Number(group.open_orders) > 0) teamsCell.append(el("span", "inplay", " · 未结算"));
     tr.append(
-      cell(formatClock(group.start_ms, current.tz), "time"),
+      timeCell,
       cell(group.league || "—", "league"),
       teamsCell,
       cell(formatPickWithPeriod({
@@ -862,6 +922,7 @@ function renderCopyGroups() {
       cell(formatMoney(group.stake), "stake"),
       cell(String(group.orders), "num center"),
       cell(String(group.members), "num center"),
+      cell(group.order_no || "—", "num center order-no"),
       cell(`${Math.round((Number(group.duration_ms) || 0) / 1000)}s`, "num center"),
     );
     body.append(tr);

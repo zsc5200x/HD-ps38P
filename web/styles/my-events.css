@@ -899,16 +899,21 @@
 .my-events-push-table .follow-result.none { color: var(--muted); }
 
 /* 展开行：合并前的平博源单 */
-.my-events-push-table tr.follow-row { cursor: pointer; }
-.my-events-push-table tr.follow-row:hover { background: rgba(255, 255, 255, 0.03); }
+.my-events-push-table tr.follow-row,
+.my-events-copy-table tr.follow-row { cursor: pointer; }
+.my-events-push-table tr.follow-row:hover,
+.my-events-copy-table tr.follow-row:hover { background: rgba(255, 255, 255, 0.03); }
+.my-events-copy-table .follow-caret,
 .my-events-push-table .follow-caret {
   display: inline-block;
   margin-right: 6px;
   color: var(--muted);
   transition: transform 0.15s ease;
 }
-.my-events-push-table tr.follow-row.expanded .follow-caret { transform: rotate(90deg); }
-.my-events-push-table tr.follow-sources > td { padding: 0; }
+.my-events-push-table tr.follow-row.expanded .follow-caret,
+.my-events-copy-table tr.follow-row.expanded .follow-caret { transform: rotate(90deg); }
+.my-events-push-table tr.follow-sources > td,
+.my-events-copy-table tr.follow-sources > td { padding: 0; }
 .follow-source-table {
   width: 100%;
   border-collapse: collapse;

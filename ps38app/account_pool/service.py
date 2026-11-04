@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ..monitor import fastest_endpoint
 from .providers import ProviderError, provider_for
 from .store import (
     AccountStore,
@@ -120,6 +121,13 @@ class AccountPoolService:
         with self._lock:
             if account_id:
                 self._ensure_not_busy(account_id)
+            payload = dict(payload)
+            if str(payload.get("platform") or "") == "crown_member" and not str(
+                payload.get("base_url") or ""
+            ).strip():
+                fastest = fastest_endpoint(self.config)
+                if fastest:
+                    payload["base_url"] = fastest
             return self.store.save_account(payload, account_id)
 
     def delete_account(self, account_id: str) -> None:
@@ -155,6 +163,15 @@ class AccountPoolService:
             return {"message": f"已请求{action}，请在浏览器完成登录"}
         if not account["enabled"]:
             raise AccountPoolError("账号已停用，请先启用")
+        if account["platform"] == "crown_member":
+            fastest = fastest_endpoint(self.config)
+            if fastest and fastest != account.get("base_url"):
+                try:
+                    self.store.set_base_url(account_id, fastest)
+                    account["base_url"] = fastest
+                    self.store.log(account_id, "login", "success", f"已切换入口：{fastest}")
+                except ValueError:
+                    pass
         with self._lock:
             self._ensure_not_busy(account_id)
             self._busy.add(account_id)

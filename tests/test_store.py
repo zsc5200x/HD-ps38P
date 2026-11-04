@@ -266,6 +266,46 @@ class CopyGroupTests(unittest.TestCase):
         self.assertEqual(group["orders"], 2)
         self.assertEqual(group["members"], 1)
 
+    def test_group_exposes_stable_key_and_source_rows(self):
+        base = 1_760_000_000_000
+        self.commit([
+            self.order("1", created=base, stake=100, score="0-0"),
+            self.order("2", created=base + 3_000, stake=50, score="0-0", member="M002"),
+        ])
+        first = self.groups()["rows"][0]
+        second = self.groups()["rows"][0]
+        # 同一个 20 秒窗口刷新多次必须给出同一个批次键。
+        self.assertTrue(first["group_key"])
+        self.assertEqual(first["group_key"], second["group_key"])
+        sources = first["sources"]
+        self.assertEqual([row["order_id"] for row in sources], ["1", "2"])
+        self.assertEqual([row["stake"] for row in sources], [100.0, 50.0])
+        for field in ("league", "teams", "score", "market", "odds", "agent", "member"):
+            self.assertIn(field, sources[0])
+        self.assertEqual(sources[1]["member"], "M002")
+
+    def test_sources_only_travel_with_the_requested_page(self):
+        base = 1_760_000_000_000
+        self.commit([
+            self.order(f"o{index}", created=base + index * 21_000, stake=10, score="0-0")
+            for index in range(3)
+        ])
+        page = store.query_copy_groups(
+            self.store.db, "ALL", None, "", 1, 0, None, None, basis="created"
+        )
+        self.assertEqual(page["total"], 3)
+        self.assertEqual(len(page["rows"]), 1)
+        self.assertTrue(page["rows"][0]["sources"])
+
+    def test_group_key_changes_with_window_start(self):
+        base = 1_760_000_000_000
+        self.commit([
+            self.order("1", created=base, score="0-0"),
+            self.order("2", created=base + 20_001, score="0-0", member="M002"),
+        ])
+        keys = {group["group_key"] for group in self.groups()["rows"]}
+        self.assertEqual(len(keys), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

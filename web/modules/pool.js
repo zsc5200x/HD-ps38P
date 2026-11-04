@@ -29,6 +29,7 @@ let snapshot = null;
 let refreshTimer = null;
 let loading = false;
 const view = { search: "", filter: "all", sort: "default" };
+const monitor = { data: null, fetchedAt: 0 };
 
 function formatTime(value) {
   const raw = String(value || "");
@@ -354,6 +355,124 @@ function renderLogs(logs) {
   }
 }
 
+let poolTip = null;
+
+function poolTipNode() {
+  if (poolTip && poolTip.isConnected) return poolTip;
+  poolTip = el("div", "pool-tip");
+  poolTip.setAttribute("role", "tooltip");
+  poolTip.hidden = true;
+  document.body.append(poolTip);
+  return poolTip;
+}
+
+function showPoolTip(target, text) {
+  if (!text) return;
+  const tip = poolTipNode();
+  tip.textContent = text;
+  tip.hidden = false;
+  const rect = target.getBoundingClientRect();
+  const gap = 8;
+  const width = tip.offsetWidth;
+  const height = tip.offsetHeight;
+  let left = rect.left + rect.width / 2 - width / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  let top = rect.bottom + gap;
+  if (top + height > window.innerHeight - 8) top = rect.top - height - gap;
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(Math.max(8, top))}px`;
+}
+
+function hidePoolTip() {
+  if (poolTip && poolTip.isConnected) poolTip.hidden = true;
+}
+
+function monitorBeatTone(beat) {
+  return beat?.ok ? "up" : "down";
+}
+
+function renderMonitorCard() {
+  const card = $("poolMonitorCard");
+  if (!card) return;
+  const data = monitor.data;
+  card.replaceChildren();
+  card.dataset.monitor = "endpoints";
+
+  const head = el("header", "pool-card-head");
+  const identity = el("div", "pool-card-identity");
+  identity.append(el("span", "pool-card-dot"));
+  const names = el("div", "pool-card-names");
+  names.append(el("h3", "", "接口监控"));
+  const summary = data?.ok === false ? "不可用" : data?.endpoints?.length
+    ? `在线 ${data.summary?.online ?? 0} / ${data.summary?.total ?? data.endpoints.length}`
+    : "等待检测";
+  names.append(el("p", "", summary));
+  identity.append(names);
+  head.append(identity);
+  head.append(el("span", "pool-platform", "HTTP"));
+  card.append(head);
+
+  const list = el("div", "pool-monitor-rows");
+  const items = data?.endpoints || [];
+  if (!items.length) {
+    list.append(el("p", "pool-monitor-empty", data?.error || "还没有监控目标"));
+  }
+  for (const item of items) {
+    const row = el("div", "pool-monitor-row");
+    row.dataset.status = item.status;
+    row.dataset.tip = `${item.url}${item.error ? `｜${item.error}` : "｜正常"}${item.latency == null ? "" : `｜${item.latency}ms`}`;
+
+    const host = el("span", "pool-monitor-host");
+    host.textContent = item.host;
+    row.append(host);
+
+    // 心跳条与会员卡片保持一致：柱高按延迟缩放，绿=通、红=断。
+    const beats = item.beats || [];
+    const slots = 12;
+    const display = beats.slice(0, slots).slice().reverse();
+    const bars = el("span", "pool-monitor-bars");
+    bars.setAttribute("aria-hidden", "true");
+    const maxLatency = Math.max(80, ...display.map((beat) => Number(beat.latency) || 0));
+    const empty = Math.max(0, slots - display.length);
+    for (let index = 0; index < empty; index += 1) bars.append(el("i", "pool-beat is-empty"));
+    display.forEach((beat, index) => {
+      const bar = el("i", `pool-beat ${beat.ok ? "is-online" : "is-error"}`);
+      const latency = Number(beat.latency) || 0;
+      const height = 4 + Math.round(15 * Math.min(1, latency / maxLatency));
+      bar.style.setProperty("--bar-h", `${height}px`);
+      if (index === display.length - 1) bar.classList.add("is-latest");
+      bar.dataset.tip = `${beat.at}｜${beat.ok ? "正常" : beat.error || "失败"}｜${latency}ms`;
+      bars.append(bar);
+    });
+    row.append(bars);
+
+    const right = el("span", "pool-monitor-right");
+    const rate = el("span", `pool-monitor-rate is-${item.status}`);
+    rate.textContent = item.samples ? `${Math.round(item.uptime)}%` : "—";
+    right.append(rate);
+    const cost = el("span", "pool-monitor-cost");
+    cost.textContent = item.latency == null ? "—" : formatLatency(item.latency);
+    right.append(cost);
+    row.append(right);
+    list.append(row);
+  }
+  card.append(list);
+
+}
+
+async function loadMonitor(force = false) {
+  const now = Date.now();
+  if (!force && monitor.data && now - monitor.fetchedAt < 8000) return;
+  try {
+    const response = await fetch(`/api/monitor?t=${now}`, { cache: "no-store" });
+    monitor.data = await response.json();
+  } catch (error) {
+    monitor.data = { ok: false, error: "接口监控请求失败" };
+  }
+  monitor.fetchedAt = Date.now();
+  renderMonitorCard();
+}
+
 function render() {
   const accounts = snapshot?.accounts || [];
   const visible = filteredAccounts(accounts);
@@ -398,6 +517,7 @@ async function refresh() {
     }
     snapshot = payload;
     render();
+    if (isPoolPage()) loadMonitor();
   } catch (error) {
     if (!snapshot) {
       const empty = $("poolEmpty");
@@ -444,8 +564,14 @@ function platformDefaults(platform) {
 
 function applyPlatformDefaults() {
   const platform = $("poolPlatform")?.value || "ps38_backend";
-  const defaults = platformDefaults(platform);
+  // 皇冠会员只需要账号密码：站点地址由监控里延迟最低的入口自动填入。
+  const memberOnly = platform === "crown_member";
+  for (const field of document.querySelectorAll("[data-pool-field]")) {
+    field.hidden = memberOnly;
+  }
   const base = $("poolBaseUrl");
+  if (base) base.required = !memberOnly;
+  const defaults = platformDefaults(platform);
   const login = $("poolLoginPath");
   const dashboard = $("poolDashboardPath");
   const known = Object.values(PLATFORM_DEFAULTS).map((item) => item.base_url).filter(Boolean);
@@ -459,7 +585,7 @@ function applyPlatformDefaults() {
     hint.textContent = platform === "ps38_backend"
       ? "PS38 后台使用独立浏览器目录；主账号由采集器维护，这里新建的是额外账号。"
       : platform === "crown_member"
-        ? "皇冠会员登录后保存 Cookie 与 uid/ver，心跳使用会员站 get_member_data 检测。"
+        ? "皇冠会员只需填写账号与密码；登录时自动使用接口监控里延迟最低的站点。"
         : "皇冠后台登录后保存浏览器会话；心跳通过无头浏览器检查后台登录界面。";
   }
 }
@@ -501,8 +627,9 @@ async function submitDialog(event) {
     password: $("poolPassword")?.value || "",
     check_interval: Number($("poolIntervalInput")?.value || 60),
   };
-  if (!payload.base_url || !payload.username) {
-    if (error) error.textContent = "站点地址和登录账号为必填项";
+  const memberMode = payload.platform === "crown_member";
+  if ((!memberMode && !payload.base_url) || !payload.username) {
+    if (error) error.textContent = memberMode ? "登录账号为必填项" : "站点地址和登录账号为必填项";
     return;
   }
   try {
@@ -538,6 +665,20 @@ export function bindPoolEvents() {
     else openDialog();
   });
   $("poolCards")?.addEventListener("click", onCardsClick);
+  $("poolCards")?.addEventListener("pointerover", (event) => {
+    const target = event.target.closest?.("[data-tip]");
+    if (!target) return;
+    if (target.contains(event.relatedTarget)) return;
+    showPoolTip(target, target.dataset.tip);
+  });
+  $("poolCards")?.addEventListener("pointerout", (event) => {
+    const target = event.target.closest?.("[data-tip]");
+    if (!target) return;
+    if (target.contains(event.relatedTarget)) return;
+    hidePoolTip();
+  });
+  window.addEventListener("scroll", hidePoolTip, true);
+  window.addEventListener("resize", hidePoolTip);
   $("poolSearch")?.addEventListener("input", (event) => {
     view.search = event.target.value;
     render();
@@ -568,6 +709,7 @@ export function bindPoolEvents() {
     if (!document.hidden && isPoolPage()) refresh();
   });
   setFilterActive();
+  renderMonitorCard();
   refresh();
   if (refreshTimer) window.clearInterval(refreshTimer);
   refreshTimer = window.setInterval(() => {

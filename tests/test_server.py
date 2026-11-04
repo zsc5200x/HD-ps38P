@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 from ps38app import store
@@ -24,15 +25,17 @@ def upstream_row(order_id, member="M001", status="OPEN", created=1_760_000_000_0
         "wagerStatusTranslated": "胜" if status == "SETTLED" else "",
         "createdDate": created,
         "settlementDateTime": created + 500_000 if status == "SETTLED" else None,
-        "choices": [{
-            "btName": "OU",
-            "handicap": "2.5",
-            "selection": "UNDER",
-            "leagueName": "巴西 - 甲级联赛",
-            "eventName": "布拉干萨竞技 -vs- 桑托斯",
-            "eventDate": 1_760_010_000_000,
-            "inplay": False,
-        }],
+        "choices": [
+            {
+                "btName": "OU",
+                "handicap": "2.5",
+                "selection": "UNDER",
+                "leagueName": "巴西 - 甲级联赛",
+                "eventName": "布拉干萨竞技 -vs- 桑托斯",
+                "eventDate": 1_760_010_000_000,
+                "inplay": False,
+            }
+        ],
     }
 
 
@@ -82,10 +85,16 @@ class ServerTests(unittest.TestCase):
         db_path = Path(cls.tmp.name) / "orders.sqlite3"
         writable = store.OrderStore(db_path)
         writable.save_agents([{"code": "A1", "user_id": 11, "level": "1", "name": "代理一"}])
-        stats = {"started_at": store.now_iso(), "finished_at": store.now_iso(),
-                 "elapsed_seconds": 0.1, "request_count": 1}
+        stats = {
+            "started_at": store.now_iso(),
+            "finished_at": store.now_iso(),
+            "elapsed_seconds": 0.1,
+            "request_count": 1,
+        }
         writable.commit_snapshot("A1", "OPEN", [upstream_row("1"), upstream_row("2")], stats)
-        writable.commit_snapshot("A1", "SETTLED", [upstream_row("3", status="SETTLED", created=1_760_000_005_000)], stats)
+        writable.commit_snapshot(
+            "A1", "SETTLED", [upstream_row("3", status="SETTLED", created=1_760_000_005_000)], stats
+        )
         cls.counts = writable.counts()
         writable.close()
 
@@ -118,8 +127,12 @@ class ServerTests(unittest.TestCase):
     def post_body(self, path, payload):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
-            connection.request("POST", path, body=json.dumps(payload).encode("utf-8"),
-                               headers={"Content-Type": "application/json"})
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
             response = connection.getresponse()
             return response.status, json.loads(response.read())
         finally:
@@ -171,7 +184,8 @@ class ServerTests(unittest.TestCase):
         _status, _ct, body = self.get(
             "/api/my-events/fixture?status=ALL&teams="
             + quote("布拉干萨竞技 -vs- 桑托斯")
-            + "&event=" + str(fixture["event_ms"])
+            + "&event="
+            + str(fixture["event_ms"])
         )
         detail = json.loads(body)
         self.assertEqual(detail["total"], 3)
@@ -185,6 +199,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(payload["rows"][0]["orders"], 3)
         self.assertEqual(payload["rows"][0]["members"], 1)
         self.assertEqual(payload["window_ms"], 20000)
+        order_no = payload["rows"][0]["order_no"]
+        self.assertRegex(order_no, r"^\d{8}$")
+        self.assertNotIn("_source_row", body.decode())
+        self.assertNotIn("raw_json", body.decode())
+
+        _status, _ct, body = self.get("/api/my-events/copy-groups?status=OPEN&limit=50")
+        filtered = json.loads(body)
+        self.assertEqual(filtered["rows"][0]["order_no"], order_no)
 
     def test_status_api(self):
         _status, _ct, body = self.get("/api/status")
@@ -210,11 +232,33 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(self.poller.show_window_calls, 1)
 
+    def test_open_path_action_only_accepts_whitelisted_kinds(self):
+        with mock.patch("ps38app.server.open_in_file_manager") as opener:
+            status, payload = self.post_body("/api/actions/open-path", {"kind": "orders_db"})
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["ok"])
+            opener.assert_called_once()
+            args, kwargs = opener.call_args
+            self.assertEqual(str(args[0]), str(self.server.config["db_path"]))
+            self.assertFalse(kwargs["is_dir"])
+
+        status, payload = self.post_body("/api/actions/open-path", {"kind": "../../etc/passwd"})
+        self.assertEqual(status, 400)
+        self.assertFalse(payload["ok"])
+
+        status, payload = self.post_body("/api/actions/open-path", {})
+        self.assertEqual(status, 400)
+        self.assertFalse(payload["ok"])
+
     def test_post_keeps_connection_usable(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
-            connection.request("POST", "/api/actions/refresh", body=b"{}",
-                               headers={"Content-Type": "application/json"})
+            connection.request(
+                "POST",
+                "/api/actions/refresh",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             response.read()
@@ -233,8 +277,12 @@ class ServerTests(unittest.TestCase):
                 self.checks = 0
 
             def snapshot(self):
-                return {"ok": True, "accounts": [{"id": "a1", "name": "账号一", "status": "online"}],
-                        "logs": [], "summary": {"total": 1}}
+                return {
+                    "ok": True,
+                    "accounts": [{"id": "a1", "name": "账号一", "status": "online"}],
+                    "logs": [],
+                    "summary": {"total": 1},
+                }
 
             def save_account(self, payload, account_id=None):
                 return {"id": account_id or "a1", "name": payload.get("name", ""), "status": "idle"}
@@ -258,7 +306,11 @@ class ServerTests(unittest.TestCase):
                 return None
 
             def toggle(self, account_id, enabled):
-                return {"id": account_id, "enabled": enabled, "status": "idle" if enabled else "disabled"}
+                return {
+                    "id": account_id,
+                    "enabled": enabled,
+                    "status": "idle" if enabled else "disabled",
+                }
 
             def cancel(self, account_id):
                 return {"message": "cancelled"}
@@ -270,7 +322,9 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(json.loads(body)["ok"])
 
-            status, payload = self.post_body("/api/pool/save", {"platform": "crown_member", "name": "账号一"})
+            status, payload = self.post_body(
+                "/api/pool/save", {"platform": "crown_member", "name": "账号一"}
+            )
             self.assertEqual(status, 200)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["account"]["name"], "账号一")

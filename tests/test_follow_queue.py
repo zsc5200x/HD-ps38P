@@ -1,8 +1,6 @@
 """跟单队列、恢复、分类重试和核对闭环；仅使用临时库与模拟执行器。"""
 
 import copy
-import json
-import os
 import threading
 import time
 import unittest
@@ -79,20 +77,16 @@ class QueueTests(unittest.TestCase):
         try:
             self.enable()
             self.add("first")
-            self.tick()
-            self.clock.now += 21
             self.call_without_network_wait()
             self.assertTrue(entered.wait(2))
             first = self.groups()[0]
             self.assertEqual(first["status"], "PREPARING")
 
+            self.clock.now += 21
             self.add("second")
             self.call_without_network_wait()
             groups = self.groups()
             second = next(group for group in groups if group["id"] != first["id"])
-            self.assertEqual(second["status"], "GROUPING")
-            self.clock.now += 21
-            self.call_without_network_wait()
             self.assertEqual(self.service.detail(second["id"])["group"]["status"], "WAIT_ACCOUNT")
             self.assertEqual(len(self.executor.prepared), 1)
             with self.service.store.connect() as connection:
@@ -102,10 +96,15 @@ class QueueTests(unittest.TestCase):
 
             self.executor.on_prepare = None
             release.set()
+            # 成功状态先于账号释放和 Future 完成写入；等任务回收后再推进假时钟，
+            # 避免下一组因清理尚未完成而重新排到固定时钟之后。
             self.wait_background(
-                lambda: self.service.detail(first["id"])["group"]["status"] == "SUCCEEDED"
+                lambda: (
+                    self.service.detail(first["id"])["group"]["status"] == "SUCCEEDED"
+                    and self.service._dispatcher.active_count() == 0
+                )
             )
-            self.clock.now += 1
+            self.clock.now += 2
             self.wait_background(
                 lambda: all(group["status"] == "SUCCEEDED" for group in self.groups())
             )
@@ -120,14 +119,12 @@ class QueueTests(unittest.TestCase):
         try:
             self.enable()
             self.add("first")
-            self.tick()
-            self.clock.now += 21
             self.call_without_network_wait()
             self.assertTrue(entered.wait(2))
             first_id = self.groups()[0]["id"]
 
-            self.add("second")
             self.clock.now += 21
+            self.add("second")
             self.call_without_network_wait()
             other_executor = core.Executor(self.clock)
             other = FollowService(self.config, other_executor, self.clock)
@@ -154,7 +151,7 @@ class QueueTests(unittest.TestCase):
         self.executor.result = {
             "status": "REJECTED",
             "retryable": True,
-            "category": "MARKET",
+            "category": "MARKET_REJECTED",
             "error_code": "1X015",
             "message": "模拟封盘拒绝",
         }
@@ -188,32 +185,117 @@ class QueueTests(unittest.TestCase):
         self.tick(20)
         self.assertEqual(len(self.executor.submitted), 2)
 
-    def test_explicit_market_rejection_stops_at_three_attempts(self):
+    def test_market_change_retries_once_then_waits_within_window(self):
         self.executor.result = {
             "status": "REJECTED",
             "retryable": True,
-            "category": "MARKET",
-            "error_code": "1X003",
+            "category": "MARKET_REJECTED",
+            "error_code": "1X015",
+            "action": "retry_market_90",
         }
         self.enable()
         self.add()
         self.tick(21)
         group_id = self.groups()[0]["id"]
-        for _ in range(2):
-            stored = self.stored_group(group_id)
-            self.assertEqual(stored["status"], "RETRY_WAIT")
-            self.clock.now = stored["next_check_at"] + 0.001
-            self.tick()
+        # 第一次失败：立刻重查重提
+        stored = self.stored_group(group_id)
+        self.assertEqual(stored["status"], "RETRY_WAIT")
+        self.clock.now = stored["next_check_at"] + 0.001
+        self.tick()
+        # 第二次仍失败：进入 90 秒观察窗口
+        stored = self.stored_group(group_id)
+        self.assertEqual(stored["status"], "RETRY_WAIT")
+        self.assertGreater(stored["recheck_until"], self.clock.now)
+        # 窗口耗尽后判失败
+        self.clock.now = stored["recheck_until"] + 0.001
+        self.tick()
         self.assertEqual(self.service.detail(group_id)["group"]["status"], "REJECTED")
-        self.assertEqual(len(self.executor.submitted), 3)
-        self.tick(30)
-        self.assertEqual(len(self.executor.submitted), 3)
+        self.assertEqual(len(self.executor.submitted), 2)
+
+    def test_timeline_events_record_crown_return_code(self):
+        self.executor.result = {
+            "status": "REJECTED",
+            "retryable": False,
+            "category": "PLATFORM_REJECTED",
+            "error_code": "1X002",
+            "action": "stop",
+            "message": "已超过停止交易时间",
+        }
+        self.enable()
+        self.add()
+        self.tick(21)
+        events = self.service.store.recent_events(20)
+        self.assertTrue(events)
+        crown = [item for item in events if item["kind"] == "CROWN"]
+        self.assertTrue(crown)
+        self.assertEqual(crown[0]["error_code"], "1X002")
+        self.assertIn("已超过停止交易时间", crown[0]["message"])
+
+    def test_1x001_keeps_order_within_the_market_wait_window(self):
+        self.executor.result = {
+            "status": "REJECTED",
+            "retryable": True,
+            "category": "MARKET_REJECTED",
+            "error_code": "1X001",
+            "action": "wait_1x001",
+        }
+        self.enable()
+        self.add()
+        self.tick(21)
+        group_id = self.groups()[0]["id"]
+        stored = self.stored_group(group_id)
+        self.assertEqual(stored["status"], "WAIT_MARKET")
+        self.assertGreater(stored["market_wait_until"], self.clock.now)
+        # 窗口内继续探测
+        self.clock.now = stored["next_check_at"] + 0.001
+        self.tick()
+        self.assertIn(self.stored_group(group_id)["status"], {"WAIT_MARKET", "RETRY_WAIT"})
+        # 260 秒窗口结束后判失败
+        self.clock.now = stored["market_wait_until"] + 0.001
+        self.tick()
+        self.assertEqual(self.service.detail(group_id)["group"]["status"], "REJECTED")
+
+    def test_switch_account_tries_each_member_then_stops(self):
+        self.executor.account_ids = ["crown-a", "crown-b"]
+        self.executor.result = {
+            "status": "REJECTED",
+            "retryable": True,
+            "category": "ACCOUNT_CREDIT",
+            "error_code": "1X008",
+            "action": "switch_account",
+        }
+        self.enable()
+        self.add()
+        self.tick(21)
+        group_id = self.groups()[0]["id"]
+        self.assertEqual(self.stored_group(group_id)["status"], "RETRY_WAIT")
+        self.clock.now = self.stored_group(group_id)["next_check_at"] + 0.001
+        self.tick()
+        # 第二个号也失败后，没有可用号了
+        self.assertEqual(self.service.detail(group_id)["group"]["status"], "REJECTED")
+        tried = self.stored_group(group_id)["tried_accounts"]
+        self.assertEqual(sorted(tried), ["crown-a", "crown-b"])
+
+    def test_1x020_halves_the_stake_and_keeps_the_rest(self):
+        self.executor.result = {
+            "status": "REJECTED",
+            "retryable": True,
+            "category": "MARKET_REJECTED",
+            "error_code": "1X020",
+            "action": "split_half",
+        }
+        self.enable(amount_mode="fixed", amount_value="200", direction="forward")
+        self.add(stake="200")
+        self.tick(21)
+        group = self.stored_group(self.groups()[0]["id"])
+        self.assertEqual(group["target_stake"], "100")
+        self.assertEqual(group["split_remaining"], "100")
 
     def test_unknown_and_nonwhitelisted_rejections_are_never_resubmitted(self):
         self.executor.result = {
             "status": "REJECTED",
-            "retryable": True,
-            "category": "MARKET",
+            "retryable": False,
+            "category": "MARKET_REJECTED",
             "error_code": "UNRECOGNIZED",
         }
         self.enable()
@@ -308,138 +390,8 @@ class QueueTests(unittest.TestCase):
                     self.tick(5)
                     self.assertEqual(len(self.executor.submitted) - before, 1)
 
-    def test_unknown_auto_reconciles_only_and_exhaustion_stays_unknown(self):
-        calls = []
-
-        def reconcile(attempt, account_id):
-            calls.append((attempt, account_id))
-            return {"status": "UNKNOWN", "message": "暂未找到唯一匹配票据"}
-
-        self.executor.reconcile = reconcile
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        for seconds in (1, 10, 20, 30, 60, 120):
-            self.tick(seconds)
-            self.assertEqual(self.service.detail(group_id)["group"]["status"], "UNKNOWN")
-            self.assertEqual(len(self.executor.submitted), 1)
-        self.assertGreaterEqual(len(calls), 1)
-        self.assertLessEqual(len(calls), 5)
-        self.assertTrue(all(account_id == "crown-test" for _, account_id in calls))
-        count = len(calls)
-        self.tick(300)
-        self.assertEqual(len(calls), count)
-        self.assertTrue(self.service.detail(group_id)["reconciliations"])
-
-    def test_manual_query_while_paused_can_confirm_unknown_without_new_submission(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        self.service.pause()
-        calls = []
-
-        def reconcile(attempt, account_id):
-            calls.append((attempt, account_id))
-            return {
-                "status": "SUCCEEDED",
-                "receipt_id": "READONLY-CONFIRMED",
-                "accepted_stake": "50",
-            }
-
-        self.executor.reconcile = reconcile
-        self.service.request_reconcile(group_id)
-        self.tick()
-        detail = self.service.detail(group_id)
-        self.assertEqual(detail["group"]["status"], "SUCCEEDED")
-        self.assertEqual(detail["group"]["receipt_id"], "READONLY-CONFIRMED")
-        self.assertEqual(detail["group"]["accepted_stake"], "50")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][1], "crown-test")
-        self.assertEqual(len(self.executor.submitted), 1)
-        self.assertTrue(detail["reconciliations"])
-
-    def test_stale_exhausted_auto_snapshot_cannot_erase_new_manual_query(self):
-        calls = []
-
-        def reconcile(attempt, account_id):
-            calls.append(account_id)
-            return {"status": "UNKNOWN", "message": "模拟人工请求仍需核对"}
-
-        self.executor.reconcile = reconcile
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        with self.service.store.connect(write=True) as connection:
-            group = self.service.store.get_group(connection, group_id)
-            group.update(
-                reconcile_count=5,
-                reconcile_deadline=self.clock() - 1,
-                reconcile_next_at=self.clock(),
-            )
-            self.service.store.save_group(connection, group)
-
-        original = self.service.store.unknown_groups
-
-        def read_then_request(connection):
-            snapshot = original(connection)
-            # 模拟HTTP线程在调度器读取旧快照之后成功安排手动只读核对。
-            self.service.request_reconcile(group_id)
-            return snapshot
-
-        with patch.object(self.service.store, "unknown_groups", side_effect=read_then_request):
-            self.tick()
-        queued = self.stored_group(group_id)
-        self.assertTrue(queued["manual_reconcile_requested"])
-        self.assertIsNotNone(queued["reconcile_next_at"])
-        self.assertEqual(calls, [])
-        self.tick()
-        self.assertEqual(calls, ["crown-test"])
-        self.assertEqual(self.service.detail(group_id)["group"]["status"], "UNKNOWN")
-        self.assertEqual(len(self.executor.submitted), 1)
-
-    def test_completed_unknown_queries_do_not_starve_later_manual_query(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        with self.service.store.connect(write=True) as connection:
-            original = self.service.store.get_group(connection, group_id)
-            for index in range(100):
-                older = copy.deepcopy(original)
-                older.update(
-                    id=f"exhausted-{index:03d}",
-                    base_key=f"exhausted-key-{index:03d}",
-                    start_ms=original["start_ms"] - 1000 - index,
-                    reconcile_count=5,
-                    reconcile_deadline=self.clock() - 1,
-                    reconcile_next_at=None,
-                    manual_reconcile_requested=False,
-                    _revision=0,
-                )
-                self.service.store.save_group(connection, older)
-        calls = []
-
-        def reconcile(attempt, account_id):
-            calls.append(account_id)
-            return {"status": "SUCCEEDED", "receipt_id": "FAIR-MANUAL-QUERY"}
-
-        self.executor.reconcile = reconcile
-        self.service.request_reconcile(group_id)
-        self.tick()
-        detail = self.service.detail(group_id)
-        self.assertEqual(detail["group"]["status"], "SUCCEEDED")
-        self.assertEqual(detail["group"]["receipt_id"], "FAIR-MANUAL-QUERY")
-        self.assertEqual(calls, ["crown-test"])
-        self.assertEqual(len(self.executor.submitted), 1)
-
     def test_future_mapping_checks_do_not_starve_later_ready_group(self):
+        self.mappings.unmap("pin:101")
         self.enable(max_age_seconds=600)
         self.add()
         self.tick()
@@ -447,19 +399,23 @@ class QueueTests(unittest.TestCase):
         self.clock.now += 21
         with self.service.store.connect(write=True) as connection:
             original = self.service.store.get_group(connection, group_id)
-            original.update(status="READY", target_stake="50")
+            original.update(status="READY", target_stake="50", receipt_id=None, next_check_at=None)
             self.service.store.save_group(connection, original)
             for index in range(100):
                 older = copy.deepcopy(original)
                 older.update(
                     id=f"future-mapping-{index:03d}",
                     base_key=f"future-mapping-key-{index:03d}",
+                    source_batch_no=None,
+                    source_batch_key=None,
+                    receipt_id=None,
                     start_ms=original["start_ms"] - 1000 - index,
                     status="WAIT_MAPPING",
                     next_check_at=self.clock() + 100,
                     _revision=0,
                 )
                 self.service.store.save_group(connection, older)
+        self.mappings.map_events(self.ps, self.crown)
         self.tick()
         self.assertEqual(self.service.detail(group_id)["group"]["status"], "SUCCEEDED")
         self.assertEqual(len(self.executor.prepared), 1)
@@ -469,172 +425,6 @@ class QueueTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM follow_groups WHERE status='WAIT_MAPPING'"
             ).fetchone()[0]
         self.assertEqual(waiting, 100)
-
-    def test_manual_resolution_requires_note_and_receipt_and_does_not_replay(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        for payload in (
-            {"outcome": "SUCCEEDED", "receipt_id": "MANUAL-1"},
-            {"outcome": "SUCCEEDED", "note": "平台核查"},
-            {"outcome": "READY", "note": "不能重新排队"},
-        ):
-            with self.subTest(payload=payload), self.assertRaises(ValueError):
-                self.service.resolve_unknown(group_id, payload)
-        self.service.resolve_unknown(
-            group_id,
-            {"outcome": "SUCCEEDED", "receipt_id": "MANUAL-1", "note": "人工核对平台票号和金额"},
-        )
-        detail = self.service.detail(group_id)
-        self.assertEqual(detail["group"]["status"], "SUCCEEDED")
-        self.assertEqual(detail["group"]["receipt_id"], "MANUAL-1")
-        self.assertTrue(detail["reconciliations"])
-        self.assertIn("人工核对平台票号和金额", str(detail["reconciliations"]))
-        with self.assertRaises(ValueError):
-            self.service.resolve_unknown(group_id, {"outcome": "REJECTED", "note": "已处理"})
-        self.tick(30)
-        self.assertEqual(len(self.executor.submitted), 1)
-
-    def test_dead_reconciliation_owner_recovers_schedule_without_resetting_budget(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        with self.service.store.connect(write=True) as connection:
-            group = self.service.store.get_group(connection, group_id)
-            deadline = group["reconcile_deadline"]
-            group.update(reconcile_count=2, reconcile_next_at=None, next_action_at=None)
-            self.service.store.save_group(connection, group)
-            self.assertTrue(
-                self.service.store.claim(
-                    connection,
-                    group,
-                    "dead-reconciliation-owner",
-                    os.getpid(),
-                    "RECONCILING",
-                    self.clock(),
-                )
-            )
-        self.service.stop()
-        self.service = FollowService(self.config, self.executor, self.clock)
-        restored = self.stored_group(group_id)
-        self.assertEqual(restored["status"], "UNKNOWN")
-        self.assertEqual(restored["reconcile_count"], 2)
-        self.assertEqual(restored["reconcile_deadline"], deadline)
-        self.assertIsNotNone(restored["reconcile_next_at"])
-        calls = []
-
-        def reconcile(attempt, account_id):
-            calls.append(account_id)
-            return {"status": "SUCCEEDED", "receipt_id": "RECOVERED-READONLY"}
-
-        self.executor.reconcile = reconcile
-        self.tick()
-        self.assertEqual(self.service.detail(group_id)["group"]["status"], "SUCCEEDED")
-        self.assertEqual(self.stored_group(group_id)["reconcile_count"], 3)
-        self.assertEqual(calls, ["crown-test"])
-        self.assertEqual(len(self.executor.submitted), 1)
-
-    def test_unknown_account_blocks_later_group_until_original_result_is_resolved(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add("unknown")
-        self.tick(21)
-        unknown_id = self.groups()[0]["id"]
-        self.clock.now += 1
-        self.add("queued")
-        self.executor.result = None
-        self.tick(21)
-        queued = next(group for group in self.groups() if group["id"] != unknown_id)
-        self.assertEqual(queued["status"], "WAIT_ACCOUNT")
-        self.assertIn("核对", queued["message"] + queued.get("waiting_reason", ""))
-        self.assertEqual(len(self.executor.submitted), 1)
-        with self.service.store.connect() as connection:
-            stored_account_id = connection.execute(
-                "SELECT account_id FROM follow_groups WHERE id=?", (unknown_id,)
-            ).fetchone()[0]
-        self.assertEqual(stored_account_id, "crown-test")
-        self.service.resolve_unknown(
-            unknown_id,
-            {
-                "outcome": "REJECTED",
-                "note": "人工核对原请求未成交",
-                "accepted_stake": "50",
-                "accepted_odds": "0.95",
-            },
-        )
-        rejected = self.service.detail(unknown_id)
-        for record in (rejected["group"], rejected["attempts"][0]):
-            self.assertIsNone(record["accepted_stake"])
-            self.assertIsNone(record["accepted_odds"])
-        self.tick(1)
-        self.assertEqual(self.service.detail(queued["id"])["group"]["status"], "SUCCEEDED")
-        self.assertEqual(self.service.detail(unknown_id)["group"]["status"], "REJECTED")
-        self.assertEqual(len(self.executor.submitted), 2)
-
-    def test_active_readonly_reconciliation_blocks_manual_registration(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        entered, release = threading.Event(), threading.Event()
-
-        def reconcile(attempt, account_id):
-            entered.set()
-            if not release.wait(3):
-                raise TimeoutError("测试核对请求未释放")
-            return {"status": "UNKNOWN", "message": "模拟查询仍不明确"}
-
-        self.executor.reconcile = reconcile
-        try:
-            self.service.request_reconcile(group_id)
-            self.call_without_network_wait()
-            self.assertTrue(entered.wait(2))
-            with self.assertRaisesRegex(ValueError, "执行或核对"):
-                self.service.resolve_unknown(
-                    group_id,
-                    {"outcome": "SUCCEEDED", "receipt_id": "MANUAL-RACE", "note": "平台人工核对"},
-                )
-            with self.assertRaisesRegex(ValueError, "执行或核对"):
-                self.service.request_reconcile(group_id)
-            release.set()
-            self.wait_background(lambda: bool(self.service.detail(group_id)["reconciliations"]))
-            self.assertEqual(self.service.detail(group_id)["group"]["status"], "UNKNOWN")
-            self.assertEqual(len(self.executor.submitted), 1)
-        finally:
-            release.set()
-
-    def test_late_original_receipt_cannot_overwrite_manual_resolution(self):
-        self.executor.result = TimeoutError("模拟响应丢失")
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        original_group = self.stored_group(group_id)
-        with self.service.store.connect() as connection:
-            row = connection.execute(
-                "SELECT id,payload FROM follow_attempts WHERE group_id=?", (group_id,)
-            ).fetchone()
-            attempt_id, original_attempt = row["id"], json.loads(row["payload"])
-        self.service.resolve_unknown(
-            group_id,
-            {"outcome": "SUCCEEDED", "receipt_id": "MANUAL-FINAL", "note": "人工核对票据归属"},
-        )
-        self.service._finish(
-            original_group,
-            attempt_id,
-            original_attempt,
-            {"status": "SUCCEEDED", "receipt_id": "LATE-RECEIPT", "accepted_stake": "99"},
-        )
-        detail = self.service.detail(group_id)
-        self.assertEqual(detail["group"]["receipt_id"], "MANUAL-FINAL")
-        self.assertEqual(detail["group"]["receipt_source"], "manual")
-        self.assertEqual(detail["attempts"][0]["receipt_id"], "MANUAL-FINAL")
-        self.assertEqual(len(self.executor.submitted), 1)
 
     def test_restart_after_stop_timeout_reaps_completed_worker_before_resuming(self):
         entered, release = self.block_prepare()

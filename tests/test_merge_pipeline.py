@@ -41,6 +41,32 @@ class MatchingPipelineTests(unittest.TestCase):
             {"id": "p1", "name": "Argentina League", "eventCount": 1},
             {"id": "100", "name": "Argentina League", "eventCount": 1})
 
+    def test_legacy_mapping_gets_ecid_and_team_ids_backfilled(self):
+        legacy = {"id": "c1", "home": "River Plate", "away": "Boca Juniors",
+                  "league": "Argentina League", "providerLeagueId": "100",
+                  "kickoffUtc": self.kickoff.isoformat()}
+        self.service.store.map_events(self.ps, legacy)
+        self.assertIsNone(legacy.get("ecid"))
+
+        live = {"id": "c1", "home": "River Plate", "away": "Boca Juniors",
+                "league": "Argentina League", "leagueId": "100", "providerLeagueId": "100",
+                "homeId": "11", "awayId": "22", "ecid": "333",
+                "kickoffUtc": self.kickoff.isoformat()}
+        self.assertEqual(self.service.store.backfill_crown_identity([live]), 1)
+
+        snapshot = self.service.store.list_mappings()[0]["crownSnapshot"]
+        self.assertEqual((snapshot["ecid"], snapshot["homeId"], snapshot["awayId"]),
+                         ("333", "11", "22"))
+        # 幂等：第二次不再写。
+        self.assertEqual(self.service.store.backfill_crown_identity([live]), 0)
+
+    def test_backfill_skips_unknown_or_incomplete_crown_events(self):
+        self.service.store.map_events(self.ps, {"id": "c1", "home": "A", "away": "B"})
+        self.assertEqual(self.service.store.backfill_crown_identity(
+            [{"id": "c1", "ecid": "", "homeId": "1", "awayId": "2"}]), 0)
+        self.assertEqual(self.service.store.backfill_crown_identity(
+            [{"id": "other", "ecid": "9", "homeId": "1", "awayId": "2"}]), 0)
+
     def test_orders_cannot_create_fixtures_or_overwrite_live_state(self):
         historical = {**self.ps, "id": "old", "source": "ps38", "orders": 99,
                       "kickoffUtc": (self.now - timedelta(days=1)).isoformat(), "isLive": True}

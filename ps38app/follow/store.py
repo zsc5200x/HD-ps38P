@@ -21,7 +21,7 @@ ACTIVE = {
     "RETRY_WAIT",
 }
 PROCESSING = ACTIVE | {"SUBMITTING"}
-FAILED = {"REJECTED", "SKIPPED", "EXPIRED"}
+FAILED = {"REJECTED", "SKIPPED", "EXPIRED", "PARTIAL"}
 STATES = PROCESSING | FAILED | {"SUCCEEDED", "UNKNOWN"}
 
 
@@ -36,7 +36,7 @@ def dump(value):
 
 
 def public_group(group):
-    return {
+    result = {
         key: value
         for key, value in group.items()
         if key
@@ -55,6 +55,11 @@ def public_group(group):
             "reconcile_deadline",
         }
     }
+    # 列表需要区分赛前/滚球；intent 不外传，只透出这一个布尔值。
+    intent = group.get("intent")
+    if isinstance(intent, dict) and isinstance(intent.get("is_live"), bool):
+        result["is_live"] = intent["is_live"]
+    return result
 
 
 class FollowStore:
@@ -78,6 +83,9 @@ class FollowStore:
                     ON follow_groups(base_key,start_ms);
                 CREATE INDEX IF NOT EXISTS follow_groups_status
                     ON follow_groups(status,start_ms);
+                CREATE UNIQUE INDEX IF NOT EXISTS follow_groups_source_batch
+                    ON follow_groups(json_extract(payload,'$.source_batch_no'))
+                    WHERE json_extract(payload,'$.source_batch_no') IS NOT NULL;
                 CREATE UNIQUE INDEX IF NOT EXISTS follow_groups_receipt
                     ON follow_groups(account_id,receipt_id) WHERE receipt_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS follow_members (
@@ -92,6 +100,15 @@ class FollowStore:
                     status TEXT NOT NULL, payload TEXT NOT NULL,
                     FOREIGN KEY(group_id) REFERENCES follow_groups(id)
                 );
+                CREATE TABLE IF NOT EXISTS follow_parts (
+                    id TEXT PRIMARY KEY, group_id TEXT NOT NULL,
+                    part_index INTEGER NOT NULL, status TEXT NOT NULL,
+                    stake TEXT NOT NULL, account_id TEXT NOT NULL,
+                    ticket_id TEXT, payload TEXT NOT NULL,
+                    UNIQUE(group_id, part_index)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS follow_parts_ticket
+                    ON follow_parts(account_id,ticket_id) WHERE ticket_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS follow_claims (
                     group_id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE,
                     owner_id TEXT NOT NULL, owner_pid INTEGER NOT NULL,
@@ -129,7 +146,7 @@ class FollowStore:
     @staticmethod
     def rule(connection):
         row = connection.execute("SELECT payload FROM follow_rule WHERE id='default'").fetchone()
-        return {**json.loads(row[0]), "currency": "CNY"}
+        return {**DEFAULT_RULE, **json.loads(row[0]), "currency": "CNY"}
 
     @staticmethod
     def save_rule(connection, rule):
@@ -187,11 +204,43 @@ class FollowStore:
                             "from_status": previous.get("status"),
                             "to_status": group["status"],
                             "message": group.get("message", ""),
-                            "kind": group.get("error_category") or "STATE",
+                            "kind": group.get("history_kind")
+                            or group.get("error_category")
+                            or "STATE",
                         }
                     ),
                 ),
             )
+
+    @staticmethod
+    def save_part(connection, part):
+        connection.execute(
+            "INSERT INTO follow_parts(id,group_id,part_index,status,stake,account_id,ticket_id,payload) "
+            "VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(group_id,part_index) DO UPDATE SET "
+            "status=excluded.status,stake=excluded.stake,account_id=excluded.account_id,"
+            "ticket_id=excluded.ticket_id,payload=excluded.payload",
+            (
+                part["id"],
+                part["group_id"],
+                int(part["part_index"]),
+                part["status"],
+                str(part["stake"]),
+                part.get("account_id") or "",
+                part.get("ticket_id") or None,
+                dump(part),
+            ),
+        )
+
+    @staticmethod
+    def get_parts(connection, group_id):
+        return [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT payload FROM follow_parts WHERE group_id=? ORDER BY part_index",
+                (group_id,),
+            )
+        ]
 
     @staticmethod
     def claim(connection, group, owner_id, owner_pid, phase, now):
@@ -222,6 +271,15 @@ class FollowStore:
     def get_group(connection, group_id):
         row = connection.execute(
             "SELECT payload FROM follow_groups WHERE id=?", (group_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    @staticmethod
+    def group_for_source_batch(connection, order_no):
+        row = connection.execute(
+            "SELECT payload FROM follow_groups "
+            "WHERE json_extract(payload,'$.source_batch_no')=? LIMIT 1",
+            (str(order_no),),
         ).fetchone()
         return json.loads(row[0]) if row else None
 
@@ -288,24 +346,6 @@ class FollowStore:
                 connection.execute(
                     "DELETE FROM follow_claims WHERE group_id=?", (claim["group_id"],)
                 )
-                if claim["phase"].startswith("RECONCILING"):
-                    group = self.get_group(connection, claim["group_id"])
-                    if group and group["status"] == "UNKNOWN":
-                        requested = claim["phase"] == "RECONCILING_REQUESTED"
-                        can_resume = requested or (
-                            group.get("reconcile_count", 0) < 5
-                            and now < group.get("reconcile_deadline", 0)
-                        )
-                        group.update(
-                            manual_reconcile_requested=requested,
-                            reconcile_next_at=now if can_resume else None,
-                            next_action_at=iso_time(now) if can_resume else None,
-                            message="已恢复中断的只读核对"
-                            if can_resume
-                            else "核对已中断，请人工确认结果",
-                            updated_at=iso_time(now),
-                        )
-                        self.save_group(connection, group)
             # 查盘阶段尚未产生写请求，失去占用后可重新准备。已提交阶段只可核对。
             for row in connection.execute(
                 "SELECT payload FROM follow_groups WHERE status='PREPARING'"
@@ -328,12 +368,12 @@ class FollowStore:
                 if group["id"] in live:
                     continue
                 group.update(
-                    status="UNKNOWN",
-                    message="程序中断时请求已在途，需核对平台回执",
+                    status="REJECTED",
+                    message="程序中断时请求已在途，按失败记录",
+                    error_category="SUBMIT_INTERRUPTED",
+                    waiting_reason="",
+                    next_action_at=None,
                     updated_at=iso_time(now),
-                    reconcile_next_at=now,
-                    reconcile_deadline=now + 120,
-                    next_action_at=iso_time(now),
                 )
                 self.save_group(connection, group)
             for row in connection.execute(
@@ -359,8 +399,8 @@ class FollowStore:
             )
         ]
 
-    def snapshot(self, status="SUCCEEDED", search="", limit=50, offset=0):
-        status = str(status or "SUCCEEDED").upper()
+    def snapshot(self, status="ALL", search="", limit=50, offset=0):
+        status = str(status or "ALL").upper()
         if status not in STATES | {"ALL", "PROCESSING", "FAILED"}:
             raise ValueError("跟单状态筛选无效")
         limit, offset = max(1, min(200, int(limit))), max(0, int(offset))
@@ -472,6 +512,40 @@ class FollowStore:
             "offset": offset,
         }
 
+    def recent_events(self, limit=80):
+        """返回最近的状态时间线事件（跨订单），供执行日志窗口展示。"""
+        limit = max(1, min(300, int(limit)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT h.group_id, h.payload, g.payload FROM follow_history h "
+                "JOIN follow_groups g ON g.id = h.group_id ORDER BY h.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        events = []
+        for group_id, event, group in rows:
+            try:
+                item = json.loads(event or "{}")
+                group_payload = json.loads(group or "{}")
+            except (TypeError, ValueError):
+                continue
+            events.append(
+                {
+                    "group_id": group_id,
+                    "at": item.get("at"),
+                    "kind": item.get("kind") or "",
+                    "from_status": item.get("from_status"),
+                    "to_status": item.get("to_status"),
+                    "message": item.get("message") or "",
+                    "batch": group_payload.get("source_batch_no"),
+                    "market_type": group_payload.get("market_type"),
+                    "target_line": group_payload.get("target_line"),
+                    "account_id": group_payload.get("account_id") or "",
+                    "stake": group_payload.get("target_stake"),
+                    "error_code": group_payload.get("error_code") or "",
+                }
+            )
+        return events
+
     def detail(self, group_id):
         with self.connect() as connection:
             group = self.get_group(connection, group_id)
@@ -493,6 +567,7 @@ class FollowStore:
                     "SELECT payload FROM follow_history WHERE group_id=? ORDER BY id", (group_id,)
                 )
             ]
+            parts = self.get_parts(connection, group_id)
             reconciliations = [
                 json.loads(row[0])
                 for row in connection.execute(
@@ -505,6 +580,7 @@ class FollowStore:
             "group": public_group(group),
             "members": members,
             "attempts": attempts,
+            "parts": parts,
             "history": history,
             "reconciliations": reconciliations,
         }

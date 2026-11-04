@@ -161,12 +161,13 @@ class FollowIntegrationTests(unittest.TestCase):
                 "direction": "reverse",
                 "amount_mode": "ratio",
                 "amount_value": "10",
+                "min_stake": 0,
                 "account_id": "test-account",
             },
         )
         self.assertEqual(status, 200)
         rows = []
-        for order_id, stake, seconds in (("source-1", "100", 0), ("source-2", "200", 8)):
+        for order_id, stake, seconds in (("source-1", "300", 0), ("source-2", "200", 0)):
             self.now += seconds
             row = source_samples.raw_order(
                 order_id, order_id, int(self.now * 1000), stake=stake, currencyCode=currency
@@ -175,9 +176,13 @@ class FollowIntegrationTests(unittest.TestCase):
             rows.append(row)
             self.commit(rows)
             self.service.run_once()
-        self.assertEqual(self.request("GET", "/api/follow")[1]["total"], 0)
-        self.now += 13
-        self.service.run_once()
+        # 主页的 8 位批次首次收到即处理；同批次后续源单不追加、不重发。
+        page = self.request("GET", "/api/follow")[1]
+        self.assertEqual(page["total"], 1)
+        group = page["rows"][0]
+        self.assertEqual(len(group["source_batch_no"]), 8)
+        self.assertTrue(group["source_batch_no"].isdigit())
+        self.assertEqual((group["order_count"], group["source_stake"]), (1, "300"))
 
     def test_merged_order_reaches_real_adapter_and_confirmed_receipt_api(self):
         self.process_group()
@@ -188,100 +193,34 @@ class FollowIntegrationTests(unittest.TestCase):
         self.assertEqual((group["status"], group["receipt_id"]), ("SUCCEEDED", "LOCAL-RECEIPT-1"))
         self.assertEqual(group["account_id"], "test-account")
         self.assertEqual(
-            (group["order_count"], group["source_stake"], group["accepted_stake"]), (2, "300", "30")
+            (group["order_count"], group["source_stake"], group["accepted_stake"]), (1, "300", "30")
         )
         self.assertEqual((group["target_side"], group["target_line"]), ("AWAY", "0.5"))
         status, detail = self.request("GET", f"/api/follow/groups/{group['id']}")
         self.assertEqual(status, 200)
-        self.assertEqual(len(detail["members"]), 2)
+        self.assertEqual(len(detail["members"]), 1)
+        self.assertEqual(detail["members"][0]["order_id"], "source-1")
         self.assertEqual(len(detail["attempts"]), 1)
         for secret in ("fixture-uid", "fixture-ver", "fixture=cookie", "raw_json"):
             self.assertNotIn(secret, json.dumps(detail))
         self.service.run_once()
         self.assertEqual(sum(call["p"] == "FT_bet" for call in self.calls), 1)
 
-    def test_uncertain_response_never_appears_as_success_or_resubmits(self):
+    def test_uncertain_response_is_reported_as_failure_and_never_resubmitted(self):
         self.receipt = b"<html>local simulated gateway error</html>"
         self.process_group()
-        self.assertEqual(self.request("GET", "/api/follow")[1]["total"], 0)
-        unknown = self.request("GET", "/api/follow?status=UNKNOWN")[1]
-        self.assertEqual(unknown["total"], 1)
-        self.assertIsNone(unknown["rows"][0]["receipt_id"])
+        self.assertEqual(self.request("GET", "/api/follow?status=SUCCEEDED")[1]["total"], 0)
+        failed = self.request("GET", "/api/follow?status=FAILED")[1]
+        self.assertEqual(failed["total"], 1)
+        self.assertIsNone(failed["rows"][0]["receipt_id"])
         for _ in range(3):
             self.now += 5
             self.service.run_once()
         self.assertEqual(sum(call["p"] == "FT_bet" for call in self.calls), 1)
 
-    def test_lost_submit_response_is_reconciled_without_a_second_bet(self):
-        self.bet_exception = TimeoutError("本地模拟平台已接单但响应丢失")
-        self.process_group()
-        _, unknown = self.request("GET", "/api/follow?status=UNKNOWN")
-        self.assertEqual(unknown["total"], 1)
-        group_id = unknown["rows"][0]["id"]
-        _, before = self.request("GET", f"/api/follow/groups/{group_id}")
-        self.assertEqual(before["attempts"][0]["status"], "UNKNOWN")
-        self.assertEqual(before["reconciliations"], [])
-        self.wager_response = json.dumps(
-            {
-                "ok": True,
-                "complete": True,
-                "wagers": [
-                    {
-                        "ticket_id": "LOCAL-RECOVERED-1",
-                        "member_id": "test-account",
-                        "gid": "line-1",
-                        "master_gid": "match-1",
-                        "gtype": "FT",
-                        "wtype": "RE",
-                        "rtype": "REC",
-                        "chose_team": "C",
-                        "line": "0.5",
-                        "con": "-1",
-                        "ratio": "-100",
-                        "currency": "CNY",
-                        "golds": "30",
-                        "bet_ts": self.now,
-                        "status": "OPEN",
-                        "odds_format": "HK",
-                        "ioratio": "0.93",
-                    }
-                ],
-            }
-        ).encode()
-        self.now += 2
-        self.service.run_once()
-        _, confirmed = self.request("GET", "/api/follow")
-        self.assertEqual(confirmed["total"], 1)
-        self.assertEqual(confirmed["rows"][0]["receipt_id"], "LOCAL-RECOVERED-1")
-        _, detail = self.request("GET", f"/api/follow/groups/{group_id}")
-        self.assertEqual(detail["group"]["status"], "SUCCEEDED")
-        self.assertEqual(detail["group"]["accepted_stake"], "30")
-        self.assertEqual(detail["group"]["accepted_odds"], "0.93")
-        self.assertEqual(len(detail["attempts"]), 1)
-        self.assertEqual(detail["attempts"][0]["status"], "SUCCEEDED")
-        self.assertEqual(detail["attempts"][0]["receipt_id"], "LOCAL-RECOVERED-1")
-        self.assertTrue(detail["attempts"][0]["request_sent"])
-        self.assertEqual(detail["group"]["receipt_source"], "platform_query")
-        self.assertEqual(len(detail["reconciliations"]), 1)
-        audit = detail["reconciliations"][0]
-        self.assertEqual(
-            (audit["method"], audit["status"], audit["receipt_id"]),
-            ("automatic", "SUCCEEDED", "LOCAL-RECOVERED-1"),
-        )
-        self.assertTrue(
-            any(
-                event["from_status"] == "UNKNOWN" and event["to_status"] == "SUCCEEDED"
-                for event in detail["history"]
-            )
-        )
-        self.now += 60
-        self.service.run_once()
-        self.assertEqual(sum(call["p"] == "FT_bet" for call in self.calls), 1)
-        self.assertEqual(sum(call["p"] == "get_today_wagers" for call in self.calls), 1)
-
     def test_thb_source_amount_reaches_cny_account_without_exchange(self):
         self.process_group(currency="THB")
-        status, page = self.request("GET", "/api/follow")
+        status, page = self.request("GET", "/api/follow?status=SUCCEEDED")
         self.assertEqual(status, 200)
         group = page["rows"][0]
         self.assertEqual(
@@ -290,7 +229,7 @@ class FollowIntegrationTests(unittest.TestCase):
         self.assertEqual(group["receipt_id"], "LOCAL-RECEIPT-1")
         _, detail = self.request("GET", f"/api/follow/groups/{group['id']}")
         self.assertEqual(
-            [member["reported_currency"] for member in detail["members"]], ["THB", "THB"]
+            [member["reported_currency"] for member in detail["members"]], ["THB"]
         )
-        self.assertEqual([member["currency"] for member in detail["members"]], ["CNY", "CNY"])
+        self.assertEqual([member["currency"] for member in detail["members"]], ["CNY"])
         self.assertEqual(sum(call["p"] == "FT_bet" for call in self.calls), 1)

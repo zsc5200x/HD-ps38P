@@ -6,6 +6,7 @@ member uid are never logged or returned through the HTTP API.
 
 from __future__ import annotations
 
+import ipaddress
 import ssl
 import time
 import xml.etree.ElementTree as ET
@@ -107,6 +108,36 @@ def _parse_member_body(body: bytes) -> Dict[str, Any]:
     return {"status": "unavailable", "message": "会员在线检查未返回可识别的登录信息"}
 
 
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def preferred_origin(meta: Dict[str, Any], storage_state: Dict[str, Any], base_url: str = "") -> str:
+    """优先使用账号登记的域名入口，而不是登录后被跳转到的真实 IP。
+
+    皇冠登录成功后浏览器会被跳到后端 IP，抓会话时记录的 origin 就是那个 IP。
+    裸 IP 直连会绕过本机代理，实测失败率约 20%、耗时翻倍；域名入口更稳。
+    """
+    recorded = str(meta.get("origin") or "").rstrip("/")
+    candidate = str(base_url or meta.get("base_url") or "").rstrip("/")
+    try:
+        host = urlsplit(candidate).hostname or ""
+    except ValueError:
+        host = ""
+    if (
+        host
+        and not _is_ip_literal(host)
+        and urlsplit(candidate).scheme in {"http", "https"}
+        and cookie_header(storage_state, candidate)
+    ):
+        return candidate
+    return recorded or candidate
+
+
 def ping_member(
     base_url: str,
     storage_state: Dict[str, Any],
@@ -124,7 +155,7 @@ def ping_member(
     uid = str(meta.get("uid") or "").strip()
     ver = str(meta.get("ver") or "").strip()
     langx = str(meta.get("langx") or DEFAULT_LANG).strip() or DEFAULT_LANG
-    origin = str(meta.get("origin") or base_url).rstrip("/")
+    origin = preferred_origin(meta, storage_state, base_url)
     try:
         parsed = urlsplit(origin)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:

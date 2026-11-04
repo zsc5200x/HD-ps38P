@@ -124,13 +124,6 @@
   white-space: nowrap;
 }
 
-.merge-panel-hint {
-  padding: 8px 13px 0;
-  color: var(--muted-2);
-  font-size: 0.67rem;
-  line-height: 1.55;
-}
-
 /* leagues */
 
 .merge-league-list {
@@ -610,6 +603,10 @@
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.6rem;
+}
+
+.merge-crown-team-ids {
+  overflow-wrap: anywhere;
 }
 
 .merge-mapped-arrow {

@@ -63,7 +63,7 @@ def _timestamp_ms(value, label):
     return int(number)
 
 
-def source_intent(row):
+def source_intent(row, allow_prematch=False):
     raw = row.get("raw_json")
     try:
         raw = json.loads(raw) if isinstance(raw, str) else raw
@@ -99,8 +99,8 @@ def source_intent(row):
         or choice.get("specialEventNameReversed")
     ):
         raise ValueError("首版不支持角球或特殊玩法")
-    live = choice.get("inplay")
-    if str(live).lower() not in {"true", "1"}:
+    live = str(choice.get("inplay")).lower() in {"true", "1"}
+    if not live and not allow_prematch:
         raise ValueError("首版仅支持滚球订单")
     period = choice.get("periodType")
     if period is None:
@@ -133,7 +133,11 @@ def source_intent(row):
         r"\s*(\d{1,2})\s*[-:]\s*(\d{1,2})\s*", str(choice.get("score") or "")
     )
     if not score_match:
-        raise ValueError("滚球原单缺少有效比分")
+        if live:
+            raise ValueError("滚球原单缺少有效比分")
+        score = ""  # 赛前订单没有比分
+    else:
+        score = f"{score_match.group(1)}:{score_match.group(2)}"
     teams = str(choice.get("eventName") or row.get("teams") or "")
     parts = re.split(r"\s*(?:-vs-|\s+vs\.?\s+|\s+v\s+| 对 )\s*", teams, maxsplit=1, flags=re.I)
     if len(parts) != 2 or not all(part.strip() for part in parts):
@@ -177,8 +181,8 @@ def source_intent(row):
         "period": "HT" if str(period) == "1" else "FT",
         "side": side,
         "line": line,
-        "is_live": True,
-        "score": f"{int(score_match[1])}:{int(score_match[2])}",
+        "is_live": live,
+        "score": score,
         "stake": number_text(stake),
         "currency": currency,
         "reported_currency": reported_currency,

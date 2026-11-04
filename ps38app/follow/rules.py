@@ -1,7 +1,7 @@
 """规则校验与唯一方向变换入口。"""
 
 import re
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 
 from .source import decimal_value, number_text
 
@@ -18,8 +18,13 @@ DEFAULT_RULE = {
     "max_odds": None,
     "scope": "live",
     "member_codes": [],
-    "window_seconds": 20,
+    "window_seconds": 0,
     "rounding": "down_integer",
+    "split_count": 1,
+    "min_stake": 100,
+    "split_delay_seconds": 0,
+    "match_limit_amount": 0,
+    "market_limit_amount": 0,
 }
 
 
@@ -75,10 +80,40 @@ def validate_rule(payload, previous=None):
     rule["member_codes"] = sorted({str(value).strip() for value in members if str(value).strip()})
     if any(len(value) > 80 for value in rule["member_codes"]):
         raise ValueError("会员标识过长")
+    try:
+        try:
+            rule["min_stake"] = max(0, int(rule.get("min_stake") or 0))
+        except (TypeError, ValueError):
+            raise ValueError("最低投注金额必须是整数") from None
+        split_count = int(1 if rule.get("split_count") is None else rule.get("split_count"))
+    except (TypeError, ValueError):
+        raise ValueError("分单数量必须是整数") from None
+    if not 1 <= split_count <= 50:
+        raise ValueError("分单数量必须在 1 到 50 之间")
+    rule["split_count"] = split_count
+
+    raw_delay = rule.get("split_delay_seconds")
+    try:
+        split_delay = float(0 if raw_delay is None else raw_delay)
+    except (TypeError, ValueError):
+        raise ValueError("分单间隔必须是数字") from None
+    if not 0 <= split_delay <= 60:
+        raise ValueError("分单间隔必须在 0 到 60 秒之间")
+    rule["split_delay_seconds"] = split_delay
+
+    for key, label in (
+        ("match_limit_amount", "单场限额"),
+        ("market_limit_amount", "盘口限额"),
+    ):
+        value = decimal_value(rule.get(key) or 0, label)
+        if value < 0:
+            raise ValueError(f"{label}必须是非负数字")
+        rule[key] = number_text(value)
+
     if rule["enabled"] and not rule["amount_value"]:
         raise ValueError("启用前请设置跟单金额或比例")
     rule["id"] = "default"
-    rule["window_seconds"] = 20
+    rule["window_seconds"] = 0
     rule["rounding"] = "down_integer"
     if previous and any(
         rule[key] != previous.get(key) for key in DEFAULT_RULE if key not in {"version", "enabled"}
@@ -106,3 +141,21 @@ def group_stake(total, rule):
     if value < 1:
         raise ValueError("组目标金额向下取整后不足 1")
     return number_text(value)
+
+
+def split_stakes(total_stake, split_count) -> list:
+    """把总金额按整数尽量平均拆成 N 份，总和保持不变；每份至少 1 元。"""
+    try:
+        total = Decimal(str(total_stake))
+    except Exception:  # noqa: BLE001 - 非法金额按 0 处理
+        return []
+    if total <= 0:
+        return []
+    total_int = int(total.to_integral_value(rounding=ROUND_CEILING))
+    count = max(1, min(50, int(split_count or 1)))
+    count = min(count, total_int)
+    if count <= 1:
+        return [total_int]
+    base, remainder = divmod(total_int, count)
+    parts = [base + 1] * remainder + [base] * (count - remainder)
+    return [part for part in parts if part > 0]

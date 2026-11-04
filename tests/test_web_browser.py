@@ -77,7 +77,30 @@ class WebBrowserTests(unittest.TestCase):
         self.blocked_requests = []
         self.unexpected_api_requests = []
         self.fail_save = False
+        self.open_path_requests = []
         self.pool_response = None
+        self.copy_groups_response = None
+        self.monitor_response = {
+            "ok": True,
+            "endpoints": [
+                {
+                    "url": "https://hga038.com", "host": "hga038.com",
+                    "beats": [{"at": "2026-11-04T10:00:00+00:00", "ok": True,
+                               "latency": 280, "error": ""}],
+                    "uptime": 100.0, "samples": 1, "status": "online",
+                    "latency": 280, "last_checked": "2026-11-04T10:00:00+00:00", "error": "",
+                },
+                {
+                    "url": "https://hga050.com", "host": "hga050.com",
+                    "beats": [{"at": "2026-11-04T10:00:00+00:00", "ok": False,
+                               "latency": 190, "error": "TLS: SSLEOFError"}],
+                    "uptime": 0.0, "samples": 1, "status": "down",
+                    "latency": 190, "last_checked": "2026-11-04T10:00:00+00:00",
+                    "error": "TLS: SSLEOFError",
+                },
+            ],
+            "summary": {"total": 2, "online": 1, "offline": 1, "interval": 30},
+        }
         self.merge_response_sequence = None
         self.merge_request_count = 0
         self.context = self.browser.new_context(service_workers="block", locale="zh-CN")
@@ -104,6 +127,12 @@ class WebBrowserTests(unittest.TestCase):
         if parsed.path == "/api/pool/save" and self.fail_save:
             route.fulfill(status=503, json={"ok": False, "error": "模拟保存失败，请稍后重试"})
             return
+        if parsed.path == "/api/monitor":
+            route.fulfill(json=self.monitor_response)
+            return
+        if parsed.path == "/api/monitor/refresh":
+            route.fulfill(json={**self.monitor_response, "started": True})
+            return
         if parsed.path == "/api/pool" and self.pool_response is not None:
             route.fulfill(json=self.pool_response)
             return
@@ -115,9 +144,55 @@ class WebBrowserTests(unittest.TestCase):
                     payload = self.merge_response_sequence.pop(0)
                 route.fulfill(json=payload)
                 return
+        if parsed.path == "/api/my-events/copy-groups" and self.copy_groups_response is not None:
+            route.fulfill(json=self.copy_groups_response)
+            return
+        if parsed.path == "/api/actions/open-path":
+            self.open_path_requests.append(route.request.post_data_json)
+            route.fulfill(json={"ok": True, "message": "已在文件管理器中打开 orders.sqlite3"})
+            return
         responses = {
-            "/api/status": {"ok": True, "session": {"status": "online"}, "backfill": {}},
+            "/api/notify": {
+                "ok": True,
+                "enabled": False,
+                "configured": False,
+                "has_token": False,
+                "token_hint": "",
+                "chat_id": "",
+                "proxy": "",
+                "push_result": True,
+                "bot_username": "",
+                "last_error": "",
+                "last_sent_at": "",
+                "sent_count": 0,
+            },
+            "/api/status": {
+                "ok": True,
+                "version": "0.0.0-test",
+                "session": {"status": "online"},
+                "backfill": {},
+                "db": {"path": "/tmp/ps38-test/orders.sqlite3", "ready": True},
+                "config": {
+                    "host": "127.0.0.1",
+                    "port": 8899,
+                    "db_path": "/tmp/ps38-test/orders.sqlite3",
+                    "follow_db_path": "/tmp/ps38-test/follow.sqlite3",
+                    "merge_db_path": "/tmp/ps38-test/fixture_merge.sqlite3",
+                    "pool_db_path": "/tmp/ps38-test/accounts.sqlite3",
+                    "pool_dir": "/tmp/ps38-test/accounts",
+                    "has_credentials": False,
+                },
+                "counts": {"total": 0, "open": 0, "settled": 0},
+            },
             "/api/my-events": {"ok": True, "ready": True, "rows": [], "total": 0, "agents": []},
+            "/api/my-events/copy-groups": {
+                "ok": True,
+                "ready": True,
+                "rows": [],
+                "total": 0,
+                "agents": [],
+                "window_ms": 20000,
+            },
             "/api/my-events/summary": {"ok": True, "ready": False},
             "/api/my-events/events": {"ok": True, "ready": True, "events": [], "cursor": 0},
             "/api/merge": {"ok": True, "sources": {}, "counts": {}},
@@ -175,6 +250,11 @@ class WebBrowserTests(unittest.TestCase):
         )
         self.expect(self.page.locator(".settings-panel")).to_have_count(3)
         self.expect(self.page.locator("#copyRuleForm")).to_be_visible()
+        self.expect(self.page.locator("#notifySave")).to_be_enabled()
+        self.expect(self.page.locator("#notifyPanelTag")).to_have_text("未配置")
+        self.expect(self.page.locator("#notifyBotStatus")).to_have_text("未认证")
+        self.expect(self.page.locator("#copySplitCount")).to_have_value("1")
+        self.expect(self.page.locator("#copyMatchLimit")).to_have_value("0")
         self.expect(self.page.locator("#settingsState")).to_have_text("采集在线")
         self.expect(self.page.locator(".app-statusbar")).to_be_visible()
         self.expect(self.page.locator("#statusbarHealth")).to_contain_text("系统安全运行中")
@@ -187,9 +267,16 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator('[data-page-panel="settings"]')).to_be_visible()
         self.expect(self.page.locator("#appPageTitle")).to_have_text("设置")
 
+    def test_settings_paths_open_in_file_manager(self):
+        self.page.goto(f"{self.origin}/#/settings")
+        self.expect(self.page.locator(".settings-row-path")).to_have_count(5)
+        self.page.locator('[data-open-kind="orders_db"]').click()
+        self.expect(self.page.locator("#toast")).to_contain_text("已在文件管理器中打开 orders.sqlite3")
+        self.assertEqual(self.open_path_requests, [{"kind": "orders_db"}])
+
     def test_pool_filters_and_search_can_be_cleared(self):
         self.page.goto(f"{self.origin}/#/pool")
-        cards = self.page.locator("#poolCards .pool-card")
+        cards = self.page.locator("#poolCards .pool-card:not(.pool-monitor-card)")
         self.expect(cards).to_have_count(2)
         self.page.locator('[data-pool-filter="online"]').click()
         self.expect(cards).to_have_count(1)
@@ -259,6 +346,7 @@ class WebBrowserTests(unittest.TestCase):
             "crownSnapshot": {
                 "id": "crown:old", "league": "旧皇冠联赛",
                 "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+                "homeId": "crown-home-108179", "awayId": "crown-away-108180",
             },
         }
         loading = {
@@ -299,6 +387,9 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(fixtures).to_contain_text("旧皇冠联赛")
         self.expect(fixtures).to_contain_text("旧平博联赛")
         self.expect(fixtures).to_contain_text("主队 vs 客队")
+        self.expect(fixtures).to_contain_text(
+            "主队 ID crown-home-108179 · 客队 ID crown-away-108180"
+        )
         self.expect(self.page.locator("#mergeAuto")).to_be_disabled()
 
         self.merge_response_sequence = [ready]
@@ -356,11 +447,78 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#mergeFixtures")).to_contain_text("旧皇冠联赛")
         self.expect(self.page.locator("#mergeFixtures")).to_contain_text("旧平博联赛")
         self.expect(self.page.locator("#mergeFixtures")).to_contain_text("主队 vs 客队")
+        self.expect(self.page.locator("#mergeFixtures")).to_contain_text(
+            "主队 ID — · 客队 ID —"
+        )
+
+    def test_merge_uses_current_crown_ids_for_legacy_fixture_snapshot(self):
+        self.merge_response_sequence = [{
+            "ok": True,
+            "ready": True,
+            "refreshing": False,
+            "generatedAt": "2026-11-04T12:00:00+08:00",
+            "sources": {
+                "ps38": {"ok": True, "count": 0, "leagueCount": 0},
+                "crown": {"ok": True, "count": 2, "leagueCount": 1},
+            },
+            "counts": {"leagueMappings": 1, "fixtureMappings": 1},
+            "ps38Events": [],
+            "crownEvents": [
+                {"id": "crown:other", "homeId": "wrong-home", "awayId": "wrong-away"},
+                {"id": "crown:old", "homeId": "108179", "awayId": "108180"},
+            ],
+            "ps38Leagues": [],
+            "crownLeagues": [],
+            "leagueMappings": [],
+            "mappings": [{
+                "ps38Id": "pin:old",
+                "crownId": "crown:old",
+                "updatedAt": "2026-11-01T12:00:00+08:00",
+                "ps38Snapshot": {
+                    "id": "pin:old", "league": "旧平博联赛",
+                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+                },
+                "crownSnapshot": {
+                    "id": "crown:old", "league": "旧皇冠联赛",
+                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+                },
+            }],
+            "leagueSuggestions": [],
+            "suggestions": [],
+        }]
+        self.page.goto(f"{self.origin}/#/merge")
+        self.page.locator('[data-merge-view="merged"]').click()
+        team_ids = self.page.locator("#mergeFixtures .merge-crown-team-ids")
+        self.expect(team_ids).to_have_text("主队 ID 108179 · 客队 ID 108180")
+        self.expect(team_ids).not_to_contain_text("wrong-")
+
+    def test_pool_monitor_is_a_full_height_column_left_of_the_cards(self):
+        self.page.goto(f"{self.origin}/#/pool")
+        monitor = self.page.locator("#poolMonitorCard")
+        self.expect(monitor).to_be_visible()
+        self.expect(monitor.locator("h3")).to_have_text("接口监控")
+        self.expect(monitor.locator(".pool-monitor-row")).to_have_count(2)
+        self.expect(monitor.locator(".pool-monitor-row").first).to_contain_text("hga038.com")
+        self.expect(monitor.locator(".pool-monitor-row").first).to_contain_text("100%")
+        self.expect(monitor.locator(".pool-monitor-row").nth(1)).to_contain_text("0%")
+        # 心跳条沿用会员卡片的 .pool-beat 样式：绿=通、红=断
+        self.expect(monitor.locator(".pool-monitor-bars .pool-beat.is-online")).to_have_count(1)
+        self.expect(monitor.locator(".pool-monitor-bars .pool-beat.is-error")).to_have_count(1)
+        self.expect(monitor.locator(".pool-monitor-bars .pool-beat")).to_have_count(24)
+        # 账号卡片在右侧，且监控列比账号卡高（纵向拉满）
+        cards = self.page.locator("#poolCards .pool-card")
+        self.expect(cards).to_have_count(2)
+        monitor_box = monitor.bounding_box()
+        cards_box = cards.first.bounding_box()
+        self.assertLess(monitor_box["x"], cards_box["x"])
+        self.assertGreater(monitor_box["height"], cards_box["height"])
 
     def test_failed_pool_save_shows_error_and_keeps_the_page_usable(self):
         self.fail_save = True
         self.page.goto(f"{self.origin}/#/pool")
-        self.expect(self.page.locator("#poolCards .pool-card")).to_have_count(2)
+        self.expect(
+            self.page.locator("#poolCards .pool-card:not(.pool-monitor-card)")
+        ).to_have_count(2)
         self.page.locator("#poolAdd").click()
         self.expect(self.page.locator("#poolDialog")).to_be_visible()
         self.page.locator("#poolUsername").fill("local-fixture")
@@ -373,6 +531,98 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#poolDialog")).to_be_hidden()
         self.page.locator('[data-page-link="home"]').click()
         self.expect(self.page.locator('[data-page-panel="home"]')).to_be_visible()
+
+    def test_copy_view_shows_order_number_and_expands_source_rows(self):
+        self.copy_groups_response = {
+            "ok": True,
+            "ready": True,
+            "total": 1,
+            "agents": [],
+            "window_ms": 20000,
+            "scanned": 2,
+            "rows": [
+                {
+                    "group_key": "k1",
+                    "order_no": "12345678",
+                    "league": "哥伦比亚 - 甲级联赛",
+                    "teams": "佩雷拉-vs-托利马体育",
+                    "market": "让球 0.50",
+                    "selection": "主",
+                    "handicap": "0.50",
+                    "period_type": 0,
+                    "units": "常规赛",
+                    "corner_event_unit": 0,
+                    "score_first": "0-1",
+                    "score_last": "0-1",
+                    "start_ms": 1793737800000,
+                    "end_ms": 1793737809000,
+                    "duration_ms": 9000,
+                    "orders": 2,
+                    "open_orders": 2,
+                    "settled_orders": 0,
+                    "members": 2,
+                    "member_sample": ["TLH0R030C1", "TLH0R040M1"],
+                    "stake": 4571.0,
+                    "odds_min": 0.93,
+                    "odds_max": 0.95,
+                    "sources": [
+                        {
+                            "order_id": "3835726359",
+                            "league": "哥伦比亚 - 甲级联赛",
+                            "teams": "佩雷拉-vs-托利马体育",
+                            "score": "0-1",
+                            "market": "让球 0.50",
+                            "selection": "主",
+                            "handicap": "0.50",
+                            "period_type": 0,
+                            "units": "常规赛",
+                            "corner_event_unit": 0,
+                            "odds": 0.93,
+                            "stake": 2672.0,
+                            "agent": "TLH0R03",
+                            "member": "TLH0R030C1",
+                            "created_ms": 1793737800000,
+                            "status": "OPEN",
+                        },
+                        {
+                            "order_id": "3835728899",
+                            "league": "哥伦比亚 - 甲级联赛",
+                            "teams": "佩雷拉-vs-托利马体育",
+                            "score": "0-1",
+                            "market": "让球 0.50",
+                            "selection": "主",
+                            "handicap": "0.50",
+                            "period_type": 0,
+                            "units": "常规赛",
+                            "corner_event_unit": 0,
+                            "odds": 0.95,
+                            "stake": 1899.0,
+                            "agent": "TLH0R04",
+                            "member": "TLH0R040M1",
+                            "created_ms": 1793737809000,
+                            "status": "OPEN",
+                        },
+                    ],
+                }
+            ],
+        }
+        self.page.goto(f"{self.origin}/#/home")
+        self.expect(self.page.locator("#myEventsCopyWrap")).to_be_visible()
+        rows = self.page.locator("#myEventsCopyBody tr.my-events-copy-row")
+        self.expect(rows).to_have_count(1)
+        self.expect(rows.first).to_contain_text("12345678")
+        self.expect(rows.first.locator("td.teams")).to_have_text("佩雷拉 vs 托利马体育")
+        self.expect(rows.first.locator("td.teams .inplay")).to_have_count(0)
+        # 明细默认收起，点行才展开源单。
+        self.expect(self.page.locator("#myEventsCopyBody .follow-source-table")).to_have_count(0)
+        rows.first.click()
+        table = self.page.locator("#myEventsCopyBody .follow-source-table")
+        self.expect(table).to_have_count(1)
+        self.expect(table).to_contain_text("3835726359")
+        self.expect(table).to_contain_text("3835728899")
+        self.expect(table).to_contain_text("TLH0R03")
+        rows.first.click()
+        self.expect(self.page.locator("#myEventsCopyBody .follow-source-table")).to_be_hidden()
 
 
 if __name__ == "__main__":

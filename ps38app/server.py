@@ -18,7 +18,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import store as order_store
 from .config import PROJECT_DIR, public_config
+from .copy_orders import assign_numbers as assign_copy_numbers
 from .fixture_merge import CrownUnavailable, MappingConflict, MergeService
+from .reveal import open_in_file_manager, resolve_target
 from .store import now_iso
 
 WEB_DIR = PROJECT_DIR / "web"
@@ -165,12 +167,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._my_events_summary(query)
             elif parsed.path == "/api/my-events/events":
                 self._my_events_events(query)
+            elif parsed.path == "/api/notify":
+                self._notify_status()
             elif parsed.path == "/api/merge":
                 self._merge()
             elif parsed.path == "/api/follow":
                 self._follow_status(query)
             elif parsed.path.startswith("/api/follow/groups/"):
                 self._follow_detail(unquote(parsed.path[len("/api/follow/groups/") :]))
+            elif parsed.path == "/api/monitor":
+                self._monitor_status()
             elif parsed.path == "/api/pool":
                 self._pool_status()
             elif parsed.path == "/api/status":
@@ -231,6 +237,18 @@ class Handler(BaseHTTPRequestHandler):
             self.server.poller.request_show_window()
             self.send_json({"ok": True, "message": "正在打开后台浏览器窗口…"})
             return
+        if parsed.path == "/api/actions/open-path":
+            self._open_path()
+            return
+        if parsed.path == "/api/notify":
+            self._notify_save()
+            return
+        if parsed.path == "/api/notify/test":
+            self._notify_test()
+            return
+        if parsed.path == "/api/notify/clear":
+            self._notify_clear()
+            return
         if parsed.path == "/api/merge/refresh":
             self._merge_refresh()
             return
@@ -243,6 +261,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/merge/auto":
             self._merge_auto()
             return
+        if parsed.path == "/api/monitor/refresh":
+            self._monitor_refresh()
+            return
         if parsed.path.startswith("/api/pool/"):
             self._pool_action(parsed.path)
             return
@@ -251,7 +272,78 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_json({"ok": False, "error": "接口不存在"}, status=404)
 
+    # ── 本机路径定位 ──────────────────────────────────────────────────────
+
+    def _open_path(self) -> None:
+        """在系统文件管理器中打开设置页展示的数据文件或目录。"""
+        try:
+            payload = self.read_json_body() or {}
+            path, is_dir = resolve_target(self.server.config, payload.get("kind"))
+            open_in_file_manager(path, is_dir=is_dir)
+            self.send_json(
+                {
+                    "ok": True,
+                    "message": f"已在文件管理器中打开 {path.name}",
+                    "path": str(path),
+                }
+            )
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001 - 系统调用失败不应影响服务
+            self.send_json({"ok": False, "error": "打开路径失败"}, status=500)
+
     # ── follow groups and confirmed receipts ──────────────────────────────
+
+    def _notify_service(self):
+        return getattr(self.server, "notify_service", None)
+
+    def _notify_unavailable(self) -> None:
+        message = getattr(self.server, "notify_error", "") or "推送服务不可用"
+        self.send_json({"ok": False, "error": message}, status=503)
+
+    def _notify_status(self) -> None:
+        service = self._notify_service()
+        if service is None:
+            self._notify_unavailable()
+            return
+        self.send_json({"ok": True, **service.status()})
+
+    def _notify_save(self) -> None:
+        from .notify import NotifyError
+
+        service = self._notify_service()
+        if service is None:
+            self._notify_unavailable()
+            return
+        payload = self.read_json_body() or {}
+        try:
+            service.save_settings(payload if isinstance(payload, dict) else {})
+        except NotifyError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        self.send_json({"ok": True, **service.status()})
+
+    def _notify_test(self) -> None:
+        from .notify import NotifyError
+
+        service = self._notify_service()
+        if service is None:
+            self._notify_unavailable()
+            return
+        try:
+            username = service.test()
+        except NotifyError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        self.send_json({"ok": True, "message": f"测试消息已发送（@{username}）"})
+
+    def _notify_clear(self) -> None:
+        service = self._notify_service()
+        if service is None:
+            self._notify_unavailable()
+            return
+        service.clear()
+        self.send_json({"ok": True, "message": "已清除机器人配置并停用推送"})
 
     def _follow_service(self):
         service = getattr(self.server, "follow_service", None)
@@ -264,24 +356,39 @@ class Handler(BaseHTTPRequestHandler):
         if pool is None:
             return []
         accounts = pool.snapshot().get("accounts", [])
-        return [
-            {
-                **{
-                    key: account.get(key)
-                    for key in ("id", "username", "status", "enabled", "platform")
-                },
-                "label": account.get("name") or account.get("label") or account.get("username"),
-            }
-            for account in accounts
-            if account.get("platform") == "crown_member"
-        ]
+        result = []
+        for account in accounts:
+            if account.get("platform") != "crown_member":
+                continue
+            beats = account.get("heartbeats") or []
+            latency = beats[-1].get("latency_ms") if beats else None
+            result.append(
+                {
+                    **{
+                        key: account.get(key)
+                        for key in (
+                            "id",
+                            "username",
+                            "status",
+                            "enabled",
+                            "platform",
+                            "balance",
+                            "balance_currency",
+                            "last_check",
+                        )
+                    },
+                    "latency_ms": latency,
+                    "label": account.get("name") or account.get("label") or account.get("username"),
+                }
+            )
+        return result
 
     def _follow_status(self, query) -> None:
         service = self._follow_service()
         if service is None:
             return
         try:
-            status = (query.get("status") or ["SUCCEEDED"])[0].upper()
+            status = (query.get("status") or ["ALL"])[0].upper()
             if status not in {"SUCCEEDED", "ALL", "PROCESSING", "FAILED", "UNKNOWN"}:
                 raise ValueError("跟单状态筛选无效")
             limit, offset = self._limit_offset(query)
@@ -291,6 +398,10 @@ class Handler(BaseHTTPRequestHandler):
                 limit=limit,
                 offset=offset,
             )
+            try:
+                payload["events"] = service.store.recent_events(80)
+            except Exception:
+                payload["events"] = []
             try:
                 accounts = self._follow_accounts()
                 available = set(service.available_account_ids())
@@ -335,18 +446,6 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/follow/pause":
                 service.pause()
                 self.send_json({"ok": True, "message": "跟单已暂停，在途结果将继续记录"})
-            elif path.startswith("/api/follow/groups/"):
-                parts = path.split("/")
-                if len(parts) != 6 or parts[5] not in {"reconcile", "resolution"}:
-                    self.send_json({"ok": False, "error": "接口不存在"}, status=404)
-                    return
-                group_id = unquote(parts[4])
-                if not group_id or len(group_id) > 128 or "/" in group_id:
-                    raise ValueError("跟单组编号无效")
-                if parts[5] == "reconcile":
-                    self.send_json(service.request_reconcile(group_id))
-                else:
-                    self.send_json(service.resolve_unknown(group_id, self.read_json_body()))
             else:
                 self.send_json({"ok": False, "error": "接口不存在"}, status=404)
         except KeyError:
@@ -372,6 +471,44 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("请求体必须是 JSON") from exc
         return payload if isinstance(payload, dict) else {}
+
+    def _monitor_snapshot(self):
+        service = getattr(self.server, "monitor_service", None)
+        if service is None:
+            return {"ok": False, "error": self.server.monitor_error or "接口监控未启用"}
+        try:
+            endpoints = service.store.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"接口监控读取失败：{exc}"}
+        online = sum(1 for item in endpoints if item["status"] == "online")
+        return {
+            "ok": True,
+            "endpoints": endpoints,
+            "summary": {
+                "total": len(endpoints),
+                "online": online,
+                "offline": len(endpoints) - online,
+                "interval": service.interval,
+            },
+        }
+
+    def _monitor_status(self) -> None:
+        self.send_json(self._monitor_snapshot())
+
+    def _monitor_refresh(self) -> None:
+        service = getattr(self.server, "monitor_service", None)
+        if service is None:
+            self.send_json(
+                {"ok": False, "error": self.server.monitor_error or "接口监控未启用"},
+                status=503,
+            )
+            return
+        try:
+            started = service.refresh_async()
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": f"触发检测失败：{exc}"}, status=500)
+            return
+        self.send_json({**self._monitor_snapshot(), "started": started})
 
     def _pool_status(self) -> None:
         pool = self._pool()
@@ -638,13 +775,23 @@ class Handler(BaseHTTPRequestHandler):
                 basis=scope["basis"],
                 from_utc=scope["from_utc"],
                 to_utc=scope["to_utc"],
+                include_internal=True,
             )
+            observe_batches = self._attach_copy_order_numbers(payload, connection)
             payload["agents"] = self._agents(connection)
         except sqlite3.Error as exc:
             self.send_json({"ok": False, "error": f"跟单合并读取失败：{exc}"}, status=500)
             return
         finally:
             connection.close()
+        if self.server.follow_service is not None and offset == 0:
+            try:
+                self.server.follow_service.observe_home_batch_rows(observe_batches)
+            except Exception:
+                pass
+        for row in payload.get("rows") or []:
+            for source in row.get("sources") or []:
+                source.pop("_source_row", None)
         payload.update(
             {
                 "ok": True,
@@ -655,6 +802,75 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
         self.send_json(payload)
+
+    def _attach_copy_order_numbers(self, payload, connection) -> list:
+        """显示批次映射到未筛选主页批次，确保其单号与跟单执行端一致。"""
+        rows = payload.get("rows") or []
+        source_rows = [
+            source.get("_source_row") or {} for row in rows for source in row.get("sources") or []
+        ]
+        created = [int(row["created_ms"]) for row in source_rows if row.get("created_ms")]
+        if not created:
+            for row in rows:
+                row["order_no"] = ""
+            return []
+
+        window_ms = order_store.COPY_MERGE_WINDOW_MS
+        canonical = order_store.query_copy_groups(
+            connection,
+            status="ALL",
+            limit=20_000,
+            offset=0,
+            from_ms=max(1, min(created) - window_ms),
+            to_ms=max(created) + window_ms,
+            basis="created",
+            window_ms=window_ms,
+            scan_limit=20_000,
+            include_internal=True,
+        )["rows"]
+        canonical_by_source = {}
+        for batch in canonical:
+            for source in batch.get("sources") or []:
+                row = source.get("_source_row") or {}
+                key = tuple(
+                    str(row.get(field) or "") for field in ("source", "member_identity", "order_id")
+                )
+                if all(key):
+                    canonical_by_source[key] = batch
+
+        visible_batches = {}
+        rows_by_id = []
+        for row in rows:
+            source_keys = [
+                tuple(
+                    str(source.get("_source_row", {}).get(field) or "")
+                    for field in ("source", "member_identity", "order_id")
+                )
+                for source in row.get("sources") or []
+            ]
+            batch = next(
+                (canonical_by_source[key] for key in source_keys if key in canonical_by_source),
+                None,
+            )
+            if batch is not None:
+                visible_batches[str(batch["group_key"])] = batch
+            rows_by_id.append((row, batch))
+
+        keys = list(visible_batches)
+        numbers = {}
+        if keys:
+            try:
+                numbers = assign_copy_numbers(self.server.config["copy_orders_db_path"], keys)
+            except Exception:
+                numbers = {}
+        for row, batch in rows_by_id:
+            row["order_no"] = numbers.get(str(batch.get("group_key") or ""), "") if batch else ""
+
+        return [
+            {**batch, "order_no": numbers.get(key, "")}
+            for key, batch in visible_batches.items()
+            if int(batch.get("open_orders") or 0) > 0 and numbers.get(key)
+        ]
 
     def _my_events_fixture(self, query) -> None:
         teams = (query.get("teams") or [""])[0].strip()
@@ -947,6 +1163,10 @@ class DashboardServer(ThreadingHTTPServer):
         self.merge_service = None
         self.follow_service = None
         self.follow_error = ""
+        self.monitor_service = None
+        self.monitor_error = ""
+        self.notify_service = None
+        self.notify_error = ""
         # 端口占用时先退出，避免第二次启动触发在途跟单恢复。
         super().__init__(address, Handler)
         try:
@@ -960,8 +1180,26 @@ class DashboardServer(ThreadingHTTPServer):
             self.follow_service = FollowService(config)
         except Exception:
             self.follow_error = "跟单存储初始化失败，请检查跟单数据库路径和权限"
+        try:
+            from .monitor import MonitorService
+
+            self.monitor_service = MonitorService(config)
+        except Exception as exc:  # noqa: BLE001 - 监控不可用不能影响主面板
+            self.monitor_service = None
+            self.monitor_error = f"接口监控初始化失败：{exc}"
+        try:
+            from .notify import NotifyService
+
+            self.notify_service = NotifyService(config)
+        except Exception as exc:  # noqa: BLE001 - 推送不可用不能影响主面板
+            self.notify_service = None
+            self.notify_error = f"推送服务初始化失败：{exc}"
 
     def server_close(self) -> None:
+        if self.notify_service is not None:
+            self.notify_service.stop()
+        if self.monitor_service is not None:
+            self.monitor_service.stop()
         if self.follow_service is not None:
             self.follow_service.stop()
         if self.merge_service is not None:
@@ -977,6 +1215,10 @@ def serve(config: Dict[str, Any], poller) -> None:
     server = build_server(config, poller)
     if server.follow_service is not None:
         server.follow_service.start()
+    if server.monitor_service is not None:
+        server.monitor_service.start()
+    if server.notify_service is not None:
+        server.notify_service.start()
     print(f"[server] PS38 赛事看板：http://{config['host']}:{config['port']}/", flush=True)
     print("[server] 仅本机访问；浏览器完成登录/2FA 后自动开始拉取订单", flush=True)
     try:

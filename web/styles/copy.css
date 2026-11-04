@@ -86,7 +86,8 @@
 .copy-filters button span { color: inherit; font-family: var(--font-mono); font-size: .68rem; opacity: .9; }
 .copy-cards { display: flex; flex-direction: column; gap: 9px; padding: 0 12px 12px; }
 .copy-card { position: relative; flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-left: 3px solid var(--border-strong); border-radius: 10px; background: var(--panel-raised); }
-.copy-card:hover { border-color: var(--border-strong); }
+.copy-card:hover { border-color: var(--border-strong); background: rgba(255, 255, 255, .012); }
+.copy-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .copy-card-success { border-left-color: var(--accent); }
 .copy-card-failed { border-left-color: var(--danger); }
 .copy-card-processing { border-left-color: var(--blue); }
@@ -100,12 +101,15 @@
 .copy-card-time { font-family: var(--font-mono); white-space: nowrap; }
 .copy-card-league { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .copy-card-badge { margin-left: auto; flex: 0 0 auto; }
-.copy-card-body { display: grid; grid-template-columns: minmax(190px, 1.2fr) repeat(3, minmax(78px, .6fr)) minmax(168px, 1.05fr) auto; gap: 8px 14px; align-items: center; padding: 8px 12px 9px; }
-.copy-card-match { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-.copy-card-teams { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: .83rem; }
-.copy-card-teams strong { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.copy-card-vs { display: inline-grid; flex: 0 0 20px; width: 20px; height: 20px; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--muted); font-size: .54rem; font-weight: 600; }
-.copy-card-pick { overflow: hidden; color: var(--muted); font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
+.copy-card-head-right { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.copy-card-body { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px 14px; align-items: start; padding: 10px 14px 12px; border-top: 1px solid rgba(255, 255, 255, .04); }
+.copy-card-status { grid-column: span 2; }
+.copy-card-match { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 14px 8px; text-align: center; }
+.copy-card-match .copy-card-league { font-size: .68rem; letter-spacing: .01em; }
+.copy-card-teams { display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 0; font-size: .95rem; }
+.copy-card-teams strong { overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.copy-card-vs { display: inline-grid; flex: 0 0 22px; width: 22px; height: 22px; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--muted); font-size: .54rem; font-weight: 600; }
+.copy-card-pick { overflow: hidden; color: var(--muted); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .copy-card-cell { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
 .copy-card-label { color: var(--muted); font-size: .65rem; white-space: nowrap; }
 .copy-card-value { color: var(--text); font-family: var(--font-mono); font-size: .79rem; font-weight: 550; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -133,6 +137,24 @@
 .copy-log-time { color: var(--muted); font-family: var(--font-mono); white-space: nowrap; }
 .copy-log-order { color: var(--text); font-family: var(--font-mono); white-space: nowrap; }
 .copy-log-detail { min-width: 200px; max-width: 380px; overflow-wrap: anywhere; }
+.copy-log-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: #9fb4d0;
+  background: rgba(126, 160, 200, 0.12);
+  border: 1px solid rgba(126, 160, 200, 0.22);
+}
+.copy-log-kind[data-kind="crown"] { color: #7ee0b0; background: rgba(56, 199, 143, 0.14); border-color: rgba(56, 199, 143, 0.32); }
+.copy-log-kind[data-kind="market_rejected"],
+.copy-log-kind[data-kind="platform_rejected"],
+.copy-log-kind[data-kind="amount_rejected"] { color: #f6b48a; background: rgba(240, 140, 80, 0.14); border-color: rgba(240, 140, 80, 0.3); }
+.copy-log-kind[data-kind="account_credit"] { color: #f0d27a; background: rgba(224, 190, 80, 0.14); border-color: rgba(224, 190, 80, 0.3); }
+.copy-log-stage { color: var(--text); font-weight: 600; white-space: nowrap; }
 .copy-log-empty { margin: 0; padding: 18px 14px; color: var(--muted); font-size: .74rem; text-align: center; }
 
 /* ── 空状态与分页 ───────────────────────────────────────────────────── */
@@ -182,9 +204,6 @@
 .copy-kicker { color: var(--muted); font-size: .72rem; }
 .copy-detail-content { padding: 20px 22px; }
 .copy-detail-status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--text-soft); font-size: .8rem; }
-.copy-detail-facts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px 26px; margin: 22px 0 26px; }
-.copy-detail-facts dt { margin-bottom: 5px; color: var(--muted); font-size: .73rem; }
-.copy-detail-facts dd { margin: 0; color: var(--text); font-size: .82rem; overflow-wrap: anywhere; }
 .copy-table-wrap { position: relative; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
 .copy-table { width: 100%; border-collapse: collapse; font-size: .76rem; text-align: left; }
 .copy-table th { padding: 10px 12px; color: var(--muted); background: rgba(0,0,0,.12); font-size: .7rem; font-weight: 500; white-space: nowrap; }
@@ -192,7 +211,20 @@
 .copy-table tbody tr:hover { background: rgba(148,163,184,.035); }
 .copy-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .copy-number { text-align: right; white-space: nowrap; }
-.copy-detail-section { margin-top: 24px; }
+/* 明细弹窗：点卡片弹出，窗口收窄，内容分区默认收起 */
+.copy-card { cursor: pointer; }
+.copy-dialog-compact { width: min(720px, calc(100vw - 32px)); max-height: min(70vh, 560px); }
+.copy-dialog-compact[open] { display: flex; flex-direction: column; }
+.copy-dialog-compact .copy-detail-content { min-height: 0; overflow-y: auto; padding: 16px 18px 18px; overscroll-behavior: contain; }
+.copy-detail-batch { color: var(--muted); font-family: var(--font-mono); font-size: .7rem; }
+.copy-detail-summary { display: flex; align-items: center; gap: 8px; padding: 8px 0; cursor: pointer; color: var(--text); font-size: .78rem; font-weight: 600; list-style: none; }
+.copy-detail-summary::-webkit-details-marker { display: none; }
+.copy-detail-summary::before { content: "▸"; color: var(--muted); transition: transform .15s ease; }
+.copy-detail-section[open] > .copy-detail-summary::before { transform: rotate(90deg); }
+.copy-detail-count { margin-left: auto; color: var(--muted); font-size: .68rem; font-weight: 400; }
+
+.copy-detail-section { margin-top: 10px; }
+.copy-detail-section + .copy-detail-section { margin-top: 18px; }
 .copy-detail-section h3 { margin: 0 0 10px; font-size: .84rem; }
 .copy-detail-section .copy-table-wrap { border: 1px solid var(--border); border-radius: 8px; }
 .copy-detail-table td { min-width: 100px; }
@@ -213,17 +245,12 @@
 /* ── 响应式 ─────────────────────────────────────────────────────────── */
 @media (max-width: 1280px) {
   .copy-layout { grid-template-columns: minmax(260px, 292px) minmax(0, 1fr); }
-  .copy-card-body { grid-template-columns: minmax(170px, 1.2fr) repeat(3, minmax(74px, .6fr)) auto; }
-  .copy-card-status { grid-column: 1 / -1; }
+  .copy-card-body { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 @media (max-width: 900px) {
   .copy-layout { grid-template-columns: minmax(0, 1fr); }
   .copy-side { position: static; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start; }
-  .copy-card-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .copy-card-match,
-  .copy-card-status { grid-column: 1 / -1; }
-  .copy-card-detail { grid-column: 1 / -1; }
-  .copy-card-detail .copy-detail-button { width: 100%; }
+  .copy-card-body { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 @media (max-width: 860px) {
   .copy-side { grid-template-columns: minmax(0, 1fr); }
@@ -242,7 +269,6 @@
   .copy-form-feedback { width: 100%; margin-bottom: 4px; }
   .copy-dialog-head { padding: 16px; }
   .copy-detail-content { padding: 16px; }
-  .copy-detail-facts { gap: 16px; }
   .copy-resolution .button { min-height: 44px; }
   .copy-resolution textarea { font-size: 16px; }
   .copy-log-table { min-width: 720px; }
@@ -250,7 +276,6 @@
 @media (max-width: 520px) {
   .copy-fields { grid-template-columns: 1fr; }
   .copy-fields .copy-field-wide { grid-column: auto; }
-  .copy-detail-facts { grid-template-columns: 1fr; }
   .copy-records-foot > div { align-items: flex-start; flex-wrap: wrap; }
   .copy-rule-actions .button { flex: 1 1 auto; }
   .copy-resolution .copy-fields { grid-template-columns: 1fr; }
@@ -467,4 +492,626 @@
     gap: 6px;
     padding: 8px;
   }
+}
+
+/* 跟单明细顶部赛事信息 */
+.copy-detail-match {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 14px 16px 13px;
+  border: 1px solid rgba(130, 148, 190, 0.18);
+  border-radius: 14px;
+  background:
+    radial-gradient(120% 160% at 50% 0%, rgba(66, 230, 164, 0.07), transparent 62%),
+    rgba(12, 19, 32, 0.55);
+}
+
+.copy-detail-league {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: #8fa2c4;
+}
+
+.copy-detail-teams {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.copy-detail-team {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.copy-detail-team:first-child {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.copy-detail-team:last-child {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.copy-detail-team strong {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #eef4ff;
+  overflow-wrap: anywhere;
+}
+
+.copy-detail-team-role {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: #7b8bab;
+}
+
+.copy-detail-vs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(130, 148, 190, 0.35);
+  background: rgba(9, 15, 26, 0.8);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #9fb1d0;
+}
+
+.copy-detail-pick-line {
+  font-size: 12px;
+  color: #b9c8e2;
+  font-variant-numeric: tabular-nums;
+}
+
+.copy-detail-outcome {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 4px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(130, 148, 190, 0.16);
+  background: rgba(7, 12, 21, 0.45);
+}
+
+.copy-detail-outcome-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.copy-detail-outcome-caption {
+  color: #7f92b3;
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+
+.copy-detail-outcome-stats {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px 16px;
+}
+
+.copy-detail-outcome-stat {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+}
+
+.copy-detail-outcome-label {
+  color: rgba(147, 161, 189, .8);
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+.copy-detail-outcome-value {
+  max-width: 100%;
+  overflow: hidden;
+  color: #e9f1ff;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-detail-outcome-value.is-accent {
+  color: #5ef0b0;
+  text-shadow: 0 0 14px rgba(66, 230, 164, .22);
+}
+
+/* 明细弹窗头部只保留一行标题与关闭按钮，赛事信息在内容区展示 */
+.copy-detail-head {
+  align-items: center;
+  padding-bottom: 6px;
+}
+
+.copy-detail-title-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 480px) {
+  .copy-detail-match {
+    padding: 12px 10px;
+  }
+
+  .copy-detail-teams {
+    gap: 8px;
+  }
+
+  .copy-detail-team strong {
+    font-size: 15px;
+  }
+
+  .copy-detail-outcome-primary,
+  .copy-detail-outcome-meta {
+    gap: 6px 8px;
+  }
+}
+
+/* ── 跟单记录卡片：重绘视觉层级 ─────────────────────────────────── */
+.copy-cards { gap: 12px; padding: 0 14px 14px; }
+
+.copy-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, .16);
+  border-left: 1px solid rgba(148, 163, 184, .16);
+  border-radius: 16px;
+  background:
+    radial-gradient(130% 190% at 0% 0%, rgba(66, 230, 164, .07), transparent 58%),
+    linear-gradient(158deg, rgba(22, 34, 55, .94), rgba(9, 16, 27, .97));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+
+/* 左侧状态条：从上到下渐隐 */
+.copy-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, rgba(66, 230, 164, .85), rgba(66, 230, 164, .05));
+}
+
+.copy-card-failed::before {
+  background: linear-gradient(180deg, rgba(232, 79, 105, .85), rgba(232, 79, 105, .05));
+}
+
+.copy-card-processing::before {
+  background: linear-gradient(180deg, rgba(96, 165, 250, .85), rgba(96, 165, 250, .05));
+}
+
+.copy-card-muted::before {
+  background: linear-gradient(180deg, rgba(148, 163, 184, .55), rgba(148, 163, 184, .04));
+}
+
+.copy-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(148, 163, 184, .3);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .38), inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+
+.copy-card-head {
+  padding: 10px 16px 9px;
+  border-bottom: 1px solid rgba(148, 163, 184, .1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .022), transparent);
+}
+
+.copy-card-ident { gap: 9px; font-size: .7rem; }
+
+.copy-card-id {
+  font-size: .77rem;
+  font-weight: 600;
+  letter-spacing: .01em;
+  color: #e8f0ff;
+}
+
+.copy-card-chip {
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, .08);
+  color: #b9c8e2;
+  font-size: .62rem;
+}
+
+.copy-card-time { color: rgba(147, 161, 189, .75); font-size: .66rem; }
+
+.copy-card-badge {
+  padding: 3px 11px;
+  border-radius: 999px;
+  font-size: .64rem;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+
+.copy-card-match {
+  gap: 6px;
+  padding: 15px 16px 11px;
+}
+
+.copy-card-match .copy-card-league {
+  font-size: .66rem;
+  letter-spacing: .03em;
+  color: #8496b6;
+}
+
+.copy-card-teams {
+  gap: 14px;
+  font-size: 1.03rem;
+}
+
+.copy-card-teams strong { font-weight: 700; color: #f0f5ff; }
+
+.copy-card-vs {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+  border: 1px solid rgba(148, 163, 184, .3);
+  background: rgba(8, 14, 24, .9);
+  color: #9fb1d0;
+  font-size: .55rem;
+}
+
+.copy-card-pick {
+  padding: 3px 11px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, .08);
+  color: #bdd0ea;
+  font-size: .68rem;
+}
+
+.copy-card-body {
+  gap: 12px 14px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid rgba(148, 163, 184, .08);
+  background: rgba(6, 11, 19, .22);
+}
+
+.copy-card-cell { gap: 3px; }
+
+.copy-card-label {
+  color: rgba(147, 161, 189, .8);
+  font-size: .63rem;
+  letter-spacing: .02em;
+}
+
+.copy-card-value {
+  font-size: .84rem;
+  font-weight: 600;
+  color: #e9f1ff;
+}
+
+.copy-card-value.is-success {
+  color: #5ef0b0;
+  text-shadow: 0 0 14px rgba(66, 230, 164, .22);
+}
+
+.copy-card-value.is-danger { color: #ff8f9f; }
+.copy-card-value.is-warning { color: #ffd27a; }
+
+/* 状态色背景：成功偏绿、失败偏红、处理中偏蓝、其余中性 */
+.copy-card-success {
+  background:
+    radial-gradient(130% 190% at 0% 0%, rgba(66, 230, 164, .09), transparent 58%),
+    linear-gradient(158deg, rgba(21, 36, 55, .95), rgba(9, 16, 27, .97));
+}
+
+.copy-card-failed {
+  background:
+    radial-gradient(130% 190% at 0% 0%, rgba(232, 79, 105, .09), transparent 58%),
+    linear-gradient(158deg, rgba(34, 24, 38, .95), rgba(10, 15, 26, .97));
+}
+
+.copy-card-processing {
+  background:
+    radial-gradient(130% 190% at 0% 0%, rgba(96, 165, 250, .09), transparent 58%),
+    linear-gradient(158deg, rgba(20, 31, 53, .95), rgba(9, 16, 27, .97));
+}
+
+.copy-card-muted {
+  background:
+    radial-gradient(130% 190% at 0% 0%, rgba(148, 163, 184, .06), transparent 58%),
+    linear-gradient(158deg, rgba(20, 30, 47, .95), rgba(9, 16, 27, .97));
+}
+
+/* 徽章带一圈柔和描边 */
+.copy-badge {
+  border: 1px solid transparent;
+  letter-spacing: .02em;
+}
+
+.copy-card .copy-badge-success {
+  border-color: rgba(66, 230, 164, .35);
+  box-shadow: 0 0 14px rgba(66, 230, 164, .15);
+}
+
+.copy-card .copy-badge-failed {
+  border-color: rgba(232, 79, 105, .32);
+  box-shadow: 0 0 12px rgba(232, 79, 105, .12);
+}
+
+/* 结果条窄屏：竖排两列，避免 4 列挤压 */
+@media (max-width: 860px) {
+  .copy-detail-outcome {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .copy-detail-outcome-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .copy-detail-outcome-stat {
+    align-items: flex-start;
+    text-align: left;
+  }
+}
+
+/* 来源订单按钮与展开区 */
+.copy-detail-sources-button {
+  margin-left: auto;
+}
+
+.copy-detail-status .copy-detail-sources-button + .copy-detail-button {
+  margin-left: 0;
+}
+
+.copy-detail-sources {
+  margin-top: 4px;
+}
+
+/* ── 卡片压缩：约 5 条可见，列表内滚动 ─────────────────────────── */
+.copy-cards {
+  max-height: min(64vh, 620px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  gap: 10px;
+}
+
+.copy-card-head {
+  padding: 7px 14px 6px;
+}
+
+.copy-card-id { font-size: .74rem; }
+.copy-card-chip { padding: 1px 7px; font-size: .6rem; }
+
+.copy-card-league-chip {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #94a6c4;
+}
+
+.copy-card-match {
+  padding: 9px 14px 8px;
+  gap: 0;
+}
+
+.copy-card-teams {
+  gap: 10px;
+  font-size: .98rem;
+}
+
+.copy-card-vs {
+  width: 22px;
+  height: 22px;
+  flex-basis: 22px;
+  font-size: .5rem;
+}
+
+.copy-card-pick {
+  margin-left: 6px;
+  padding: 1px 9px;
+  font-size: .64rem;
+  font-weight: 500;
+}
+
+.copy-card-body {
+  gap: 8px 14px;
+  padding: 8px 14px 10px;
+}
+
+.copy-card-label { font-size: .6rem; }
+.copy-card-value { font-size: .8rem; }
+.copy-card-badge { padding: 2px 9px; font-size: .62rem; }
+.copy-card-status .copy-card-value { -webkit-line-clamp: 2; }
+
+/* ── 实时性能看板：科技感重绘 ───────────────────────────────────── */
+.copy-board {
+  position: relative;
+  border-color: rgba(110, 168, 255, .16);
+  background:
+    radial-gradient(120% 90% at 0% 0%, rgba(66, 230, 164, .06), transparent 55%),
+    radial-gradient(100% 80% at 100% 0%, rgba(110, 168, 255, .07), transparent 60%),
+    linear-gradient(165deg, rgba(19, 29, 47, .96), rgba(9, 15, 26, .98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 10px 30px rgba(0, 0, 0, .25);
+}
+
+.copy-board::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(66, 230, 164, .55), rgba(110, 168, 255, .5), transparent);
+  opacity: .75;
+  pointer-events: none;
+}
+
+.copy-board .copy-panel-head {
+  border-bottom: 1px solid rgba(110, 168, 255, .14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .03), transparent);
+}
+
+.copy-board .copy-panel-mark {
+  width: 2px;
+  height: 14px;
+  background: linear-gradient(180deg, #6fe8ff, #42e6a4);
+  box-shadow: 0 0 12px rgba(66, 230, 164, .55);
+  animation: copyBoardPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes copyBoardPulse {
+  0%, 100% { opacity: .65; }
+  50% { opacity: 1; }
+}
+
+.copy-board .copy-board-grid {
+  border-bottom: 1px solid rgba(110, 168, 255, .12);
+}
+
+.copy-board .copy-kpi {
+  position: relative;
+  gap: 5px;
+  padding: 12px 14px;
+  border-right: 1px solid rgba(110, 168, 255, .12);
+  border-bottom: 1px solid rgba(110, 168, 255, .12);
+  transition: background .18s ease;
+}
+
+.copy-board .copy-kpi:hover {
+  background: rgba(110, 168, 255, .06);
+}
+
+.copy-board .copy-kpi > span {
+  color: #8ea3c4;
+  font-size: .66rem;
+  letter-spacing: .04em;
+}
+
+.copy-board .copy-kpi > strong {
+  font-size: 1.42rem;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  text-shadow: 0 0 18px currentColor;
+}
+
+.copy-board .copy-tone-green { color: #5ef0b0; }
+.copy-board .copy-tone-blue { color: #78b4ff; }
+.copy-board .copy-tone-danger { color: #ff8f9f; }
+.copy-board .copy-tone-muted { color: #b9c8e2; }
+
+/* 成功率：环形进度 + 数字 */
+.copy-kpi-rate {
+  align-items: flex-start;
+  padding-right: 10px;
+}
+
+.copy-kpi-rate > strong { font-size: 1.02rem; }
+
+.copy-rate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.copy-rate-ring {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  transform: rotate(-90deg);
+}
+
+.copy-rate-track {
+  fill: none;
+  stroke: rgba(110, 168, 255, .18);
+  stroke-width: 3;
+}
+
+.copy-rate-fill {
+  fill: none;
+  stroke: #5ef0b0;
+  stroke-width: 3;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px rgba(66, 230, 164, .55));
+  transition: stroke-dashoffset .45s ease, stroke .2s ease;
+}
+
+/* 执行性能 */
+.copy-board .copy-perf {
+  padding: 12px 14px 13px;
+  border-bottom: 1px solid rgba(110, 168, 255, .12);
+}
+
+.copy-board .copy-perf-head,
+.copy-board .copy-params-head {
+  color: #7f93b5;
+  font-size: .62rem;
+  letter-spacing: .16em;
+}
+
+.copy-board .copy-perf-grid b {
+  color: #eaf2ff;
+  font-size: .78rem;
+  font-weight: 600;
+}
+
+/* 参数字段 */
+.copy-board .copy-param-list {
+  gap: 9px 14px;
+}
+
+.copy-board .copy-param-list dt {
+  color: #7f93b5;
+  font-size: .64rem;
+  letter-spacing: .03em;
+}
+
+.copy-board .copy-param-list dd {
+  color: #d7e3fb;
+  font-size: .74rem;
+  font-weight: 500;
+}
+
+.copy-board .copy-params-version {
+  padding: 1px 7px;
+  border: 1px solid rgba(110, 168, 255, .22);
+  border-radius: 999px;
+  color: #9fc2ff;
+  font-size: .6rem;
+}
+
+/* 赛前 / 滚球 标识 */
+.copy-card-chip-prematch {
+  color: #ffcf7a;
+  border-color: rgba(244, 191, 95, .3);
+  background: rgba(244, 191, 95, .12);
+}
+
+.copy-card-chip-live {
+  color: #5ef0b0;
+  border-color: rgba(66, 230, 164, .3);
+  background: rgba(66, 230, 164, .12);
 }
