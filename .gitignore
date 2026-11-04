@@ -9,3 +9,5 @@ __pycache__/
 config.json
 data/
 .DS_Store
+# 跟单引擎参考源码已解压保存，原始压缩包仅留本地。
+/跟单引擎/follower-engine.zip

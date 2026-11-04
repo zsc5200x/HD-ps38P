@@ -5,6 +5,7 @@ extend-exclude = [
     ".playwright-mcp",
     ".playwright-browsers",
     "data",
+    "跟单引擎",
 ]
 
 [tool.ruff.lint]
