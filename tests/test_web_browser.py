@@ -77,6 +77,44 @@ class WebBrowserTests(unittest.TestCase):
         self.blocked_requests = []
         self.unexpected_api_requests = []
         self.fail_save = False
+        self.ads_import_requests = []
+        self.credential_requests = []
+        self.delete_requests = []
+        self.ads_profiles_response = {
+            "ok": True,
+            "base_url": "http://localhost:50325",
+            "items": [
+                {
+                    "profile_id": "k1aaa",
+                    "profile_no": "301",
+                    "name": "1号会员：aaa123 过期12-05",
+                    "account": "aaa123",
+                    "group_name": "测试",
+                    "proxy_host": "163.227.3.10",
+                    "proxy_port": "443",
+                    "expired": False,
+                    "stopped": False,
+                    "bound_account": None,
+                },
+                {
+                    "profile_id": "k1bbb",
+                    "profile_no": "302",
+                    "name": "2号会员：bbb456 过期12-04",
+                    "account": "bbb456",
+                    "group_name": "",
+                    "proxy_host": "163.227.3.11",
+                    "proxy_port": "443",
+                    "expired": False,
+                    "stopped": False,
+                    "bound_account": {
+                        "id": "acc-2",
+                        "name": "已绑定账号",
+                        "platform": "crown_member",
+                    },
+                },
+            ],
+            "summary": {"total": 2, "bound": 1, "expired": 0, "available": 1},
+        }
         self.open_path_requests = []
         self.pool_response = None
         self.copy_groups_response = None
@@ -84,18 +122,34 @@ class WebBrowserTests(unittest.TestCase):
             "ok": True,
             "endpoints": [
                 {
-                    "url": "https://hga038.com", "host": "hga038.com",
-                    "beats": [{"at": "2026-11-04T10:00:00+00:00", "ok": True,
-                               "latency": 280, "error": ""}],
-                    "uptime": 100.0, "samples": 1, "status": "online",
-                    "latency": 280, "last_checked": "2026-11-04T10:00:00+00:00", "error": "",
+                    "url": "https://hga038.com",
+                    "host": "hga038.com",
+                    "beats": [
+                        {"at": "2026-11-04T10:00:00+00:00", "ok": True, "latency": 280, "error": ""}
+                    ],
+                    "uptime": 100.0,
+                    "samples": 1,
+                    "status": "online",
+                    "latency": 280,
+                    "last_checked": "2026-11-04T10:00:00+00:00",
+                    "error": "",
                 },
                 {
-                    "url": "https://hga050.com", "host": "hga050.com",
-                    "beats": [{"at": "2026-11-04T10:00:00+00:00", "ok": False,
-                               "latency": 190, "error": "TLS: SSLEOFError"}],
-                    "uptime": 0.0, "samples": 1, "status": "down",
-                    "latency": 190, "last_checked": "2026-11-04T10:00:00+00:00",
+                    "url": "https://hga050.com",
+                    "host": "hga050.com",
+                    "beats": [
+                        {
+                            "at": "2026-11-04T10:00:00+00:00",
+                            "ok": False,
+                            "latency": 190,
+                            "error": "TLS: SSLEOFError",
+                        }
+                    ],
+                    "uptime": 0.0,
+                    "samples": 1,
+                    "status": "down",
+                    "latency": 190,
+                    "last_checked": "2026-11-04T10:00:00+00:00",
                     "error": "TLS: SSLEOFError",
                 },
             ],
@@ -135,6 +189,28 @@ class WebBrowserTests(unittest.TestCase):
             return
         if parsed.path == "/api/pool" and self.pool_response is not None:
             route.fulfill(json=self.pool_response)
+            return
+        if parsed.path == "/api/adspower/profiles":
+            route.fulfill(json=self.ads_profiles_response)
+            return
+        if parsed.path == "/api/pool/import-envs":
+            self.ads_import_requests.append(route.request.post_data_json or {})
+            route.fulfill(
+                json={
+                    "ok": True,
+                    "created": [{"id": "new-1", "env_id": "k1aaa"}],
+                    "skipped": [],
+                    "message": "已导入 1 个账号",
+                }
+            )
+            return
+        if parsed.path == "/api/pool/credentials":
+            self.credential_requests.append(route.request.post_data_json or {})
+            route.fulfill(json={"ok": True, "message": "账号凭据已保存"})
+            return
+        if parsed.path == "/api/pool/delete":
+            self.delete_requests.append(route.request.post_data_json or {})
+            route.fulfill(json={"ok": True, "message": "账号已删除"})
             return
         if parsed.path == "/api/merge":
             self.merge_request_count += 1
@@ -271,7 +347,9 @@ class WebBrowserTests(unittest.TestCase):
         self.page.goto(f"{self.origin}/#/settings")
         self.expect(self.page.locator(".settings-row-path")).to_have_count(5)
         self.page.locator('[data-open-kind="orders_db"]').click()
-        self.expect(self.page.locator("#toast")).to_contain_text("已在文件管理器中打开 orders.sqlite3")
+        self.expect(self.page.locator("#toast")).to_contain_text(
+            "已在文件管理器中打开 orders.sqlite3"
+        )
         self.assertEqual(self.open_path_requests, [{"kind": "orders_db"}])
 
     def test_pool_filters_and_search_can_be_cleared(self):
@@ -293,6 +371,61 @@ class WebBrowserTests(unittest.TestCase):
             "aria-pressed", "true"
         )
 
+    def test_ads_import_dialog_selects_and_imports(self):
+        self.page.goto(f"{self.origin}/#/pool")
+        self.page.locator("#poolImportAds").click()
+        dialog = self.page.locator("#poolAdsDialog")
+        self.expect(dialog).to_be_visible()
+        rows = dialog.locator(".pool-ads-row")
+        self.expect(rows).to_have_count(2)
+        self.expect(rows.nth(0)).to_contain_text("aaa123")
+        self.expect(rows.nth(1)).to_contain_text("已绑定")
+        self.expect(rows.nth(1).locator(".pool-ads-check")).to_be_disabled()
+
+        rows.nth(0).locator(".pool-ads-check").check()
+        self.expect(dialog.locator("#poolAdsImport")).to_be_enabled()
+        self.expect(dialog.locator("#poolAdsImport")).to_contain_text("导入所选（1）")
+        dialog.locator("#poolAdsImport").click()
+
+        self.expect(dialog).not_to_be_visible()
+        self.expect(self.page.locator("#toast")).to_contain_text("已导入 1 个账号")
+        self.assertEqual(len(self.ads_import_requests), 1)
+        payload = self.ads_import_requests[0]
+        self.assertEqual(payload["env_ids"], ["k1aaa"])
+        self.assertEqual(payload["platform"], "auto")
+        self.assertEqual(payload["usernames"]["k1aaa"], "aaa123")
+
+    def test_credentials_dialog_saves_totp(self):
+        self.page.goto(f"{self.origin}/#/pool")
+        self.page.locator('[data-pool-action="credentials"]').first.click()
+        dialog = self.page.locator("#poolCredDialog")
+        self.expect(dialog).to_be_visible()
+        self.expect(dialog.locator("#poolCredUsername")).to_have_value("fixture-online")
+        dialog.locator("#poolCredPassword").fill("secret-pass")
+        dialog.locator("#poolCredTotp").fill("JBSWY3DPEHPK3PXP")
+        dialog.locator('button[type="submit"]').click()
+
+        self.expect(dialog).not_to_be_visible()
+        self.expect(self.page.locator("#toast")).to_contain_text("账号凭据已保存")
+        self.assertEqual(len(self.credential_requests), 1)
+        payload = self.credential_requests[0]
+        self.assertEqual(payload["id"], "online-fixture")
+        self.assertEqual(payload["username"], "fixture-online")
+        self.assertEqual(payload["password"], "secret-pass")
+        self.assertEqual(payload["totp_secret"], "JBSWY3DPEHPK3PXP")
+
+    def test_pool_delete_requires_second_click_without_native_confirm(self):
+        self.page.goto(f"{self.origin}/#/pool")
+        button = self.page.locator('[data-pool-action="delete"]').first
+        button.click()
+        self.expect(self.page.locator("#toast")).to_contain_text("再点一次")
+        self.assertEqual(self.delete_requests, [])
+
+        button.click()
+        self.expect(self.page.locator("#toast")).to_contain_text("账号已删除")
+        self.assertEqual(len(self.delete_requests), 1)
+        self.assertEqual(self.delete_requests[0]["id"], "online-fixture")
+
     def test_member_balances_show_zero_unknown_and_refresh_from_snapshot(self):
         common = {
             "platform": "crown_member",
@@ -309,8 +442,11 @@ class WebBrowserTests(unittest.TestCase):
                 {**common, "id": "funded", "name": "余额测试", "balance": "2500.25"},
                 {**common, "id": "zero", "name": "零余额测试", "balance": "0"},
                 {
-                    **common, "id": "unknown", "name": "未知余额测试",
-                    "balance": None, "balance_checked_at": "",
+                    **common,
+                    "id": "unknown",
+                    "name": "未知余额测试",
+                    "balance": None,
+                    "balance_checked_at": "",
                 },
             ],
             "summary": {"total": 3, "online": 3, "pending": 0, "error": 0},
@@ -340,13 +476,18 @@ class WebBrowserTests(unittest.TestCase):
             "crownId": "crown:old",
             "updatedAt": "2026-11-01T12:00:00+08:00",
             "ps38Snapshot": {
-                "id": "pin:old", "league": "旧平博联赛",
-                "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+                "id": "pin:old",
+                "league": "旧平博联赛",
+                "name": "主队 vs 客队",
+                "kickoffLocal": "11-01 12:00",
             },
             "crownSnapshot": {
-                "id": "crown:old", "league": "旧皇冠联赛",
-                "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
-                "homeId": "crown-home-108179", "awayId": "crown-away-108180",
+                "id": "crown:old",
+                "league": "旧皇冠联赛",
+                "name": "主队 vs 客队",
+                "kickoffLocal": "11-01 12:00",
+                "homeId": "crown-home-108179",
+                "awayId": "crown-away-108180",
             },
         }
         loading = {
@@ -406,39 +547,51 @@ class WebBrowserTests(unittest.TestCase):
         self.assertEqual(self.merge_request_count, 1)
 
     def test_saved_fixture_mappings_remain_visible_without_crown_session(self):
-        self.merge_response_sequence = [{
-            "ok": True,
-            "ready": True,
-            "refreshing": False,
-            "generatedAt": "2026-11-04T12:00:00+08:00",
-            "sources": {
-                "ps38": {"ok": True, "count": 0, "leagueCount": 0},
-                "crown": {"ok": False, "count": 0, "leagueCount": 0,
-                          "error": "皇冠会员会话不可用"},
-            },
-            "counts": {"leagueMappings": 1, "fixtureMappings": 1},
-            "ps38Events": [],
-            "crownEvents": [],
-            "ps38Leagues": [],
-            "crownLeagues": [],
-            "leagueMappings": [],
-            "mappings": [{
-                "ps38Id": "pin:old",
-                "crownId": "crown:old",
-                "updatedAt": "2026-11-01T12:00:00+08:00",
-                "ps38Snapshot": {
-                    "id": "pin:old", "league": "旧平博联赛",
-                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+        self.merge_response_sequence = [
+            {
+                "ok": True,
+                "ready": True,
+                "refreshing": False,
+                "generatedAt": "2026-11-04T12:00:00+08:00",
+                "sources": {
+                    "ps38": {"ok": True, "count": 0, "leagueCount": 0},
+                    "crown": {
+                        "ok": False,
+                        "count": 0,
+                        "leagueCount": 0,
+                        "error": "皇冠会员会话不可用",
+                    },
                 },
-                "crownSnapshot": {
-                    "id": "crown:old", "league": "旧皇冠联赛",
-                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
-                },
-            }],
-            "leagueSuggestions": [],
-            "suggestions": [],
-            "crownError": "皇冠会员会话不可用",
-        }]
+                "counts": {"leagueMappings": 1, "fixtureMappings": 1},
+                "ps38Events": [],
+                "crownEvents": [],
+                "ps38Leagues": [],
+                "crownLeagues": [],
+                "leagueMappings": [],
+                "mappings": [
+                    {
+                        "ps38Id": "pin:old",
+                        "crownId": "crown:old",
+                        "updatedAt": "2026-11-01T12:00:00+08:00",
+                        "ps38Snapshot": {
+                            "id": "pin:old",
+                            "league": "旧平博联赛",
+                            "name": "主队 vs 客队",
+                            "kickoffLocal": "11-01 12:00",
+                        },
+                        "crownSnapshot": {
+                            "id": "crown:old",
+                            "league": "旧皇冠联赛",
+                            "name": "主队 vs 客队",
+                            "kickoffLocal": "11-01 12:00",
+                        },
+                    }
+                ],
+                "leagueSuggestions": [],
+                "suggestions": [],
+                "crownError": "皇冠会员会话不可用",
+            }
+        ]
         self.page.goto(f"{self.origin}/#/merge")
         self.expect(self.page.locator("#mergeNotice")).to_contain_text("皇冠会员会话不可用")
         merged_tab = self.page.locator('[data-merge-view="merged"]')
@@ -447,45 +600,51 @@ class WebBrowserTests(unittest.TestCase):
         self.expect(self.page.locator("#mergeFixtures")).to_contain_text("旧皇冠联赛")
         self.expect(self.page.locator("#mergeFixtures")).to_contain_text("旧平博联赛")
         self.expect(self.page.locator("#mergeFixtures")).to_contain_text("主队 vs 客队")
-        self.expect(self.page.locator("#mergeFixtures")).to_contain_text(
-            "主队 ID — · 客队 ID —"
-        )
+        self.expect(self.page.locator("#mergeFixtures")).to_contain_text("主队 ID — · 客队 ID —")
 
     def test_merge_uses_current_crown_ids_for_legacy_fixture_snapshot(self):
-        self.merge_response_sequence = [{
-            "ok": True,
-            "ready": True,
-            "refreshing": False,
-            "generatedAt": "2026-11-04T12:00:00+08:00",
-            "sources": {
-                "ps38": {"ok": True, "count": 0, "leagueCount": 0},
-                "crown": {"ok": True, "count": 2, "leagueCount": 1},
-            },
-            "counts": {"leagueMappings": 1, "fixtureMappings": 1},
-            "ps38Events": [],
-            "crownEvents": [
-                {"id": "crown:other", "homeId": "wrong-home", "awayId": "wrong-away"},
-                {"id": "crown:old", "homeId": "108179", "awayId": "108180"},
-            ],
-            "ps38Leagues": [],
-            "crownLeagues": [],
-            "leagueMappings": [],
-            "mappings": [{
-                "ps38Id": "pin:old",
-                "crownId": "crown:old",
-                "updatedAt": "2026-11-01T12:00:00+08:00",
-                "ps38Snapshot": {
-                    "id": "pin:old", "league": "旧平博联赛",
-                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
+        self.merge_response_sequence = [
+            {
+                "ok": True,
+                "ready": True,
+                "refreshing": False,
+                "generatedAt": "2026-11-04T12:00:00+08:00",
+                "sources": {
+                    "ps38": {"ok": True, "count": 0, "leagueCount": 0},
+                    "crown": {"ok": True, "count": 2, "leagueCount": 1},
                 },
-                "crownSnapshot": {
-                    "id": "crown:old", "league": "旧皇冠联赛",
-                    "name": "主队 vs 客队", "kickoffLocal": "11-01 12:00",
-                },
-            }],
-            "leagueSuggestions": [],
-            "suggestions": [],
-        }]
+                "counts": {"leagueMappings": 1, "fixtureMappings": 1},
+                "ps38Events": [],
+                "crownEvents": [
+                    {"id": "crown:other", "homeId": "wrong-home", "awayId": "wrong-away"},
+                    {"id": "crown:old", "homeId": "108179", "awayId": "108180"},
+                ],
+                "ps38Leagues": [],
+                "crownLeagues": [],
+                "leagueMappings": [],
+                "mappings": [
+                    {
+                        "ps38Id": "pin:old",
+                        "crownId": "crown:old",
+                        "updatedAt": "2026-11-01T12:00:00+08:00",
+                        "ps38Snapshot": {
+                            "id": "pin:old",
+                            "league": "旧平博联赛",
+                            "name": "主队 vs 客队",
+                            "kickoffLocal": "11-01 12:00",
+                        },
+                        "crownSnapshot": {
+                            "id": "crown:old",
+                            "league": "旧皇冠联赛",
+                            "name": "主队 vs 客队",
+                            "kickoffLocal": "11-01 12:00",
+                        },
+                    }
+                ],
+                "leagueSuggestions": [],
+                "suggestions": [],
+            }
+        ]
         self.page.goto(f"{self.origin}/#/merge")
         self.page.locator('[data-merge-view="merged"]').click()
         team_ids = self.page.locator("#mergeFixtures .merge-crown-team-ids")
@@ -511,7 +670,9 @@ class WebBrowserTests(unittest.TestCase):
         monitor_box = monitor.bounding_box()
         cards_box = cards.first.bounding_box()
         self.assertLess(monitor_box["x"], cards_box["x"])
-        self.assertGreater(monitor_box["height"], cards_box["height"])
+        # 监控列与卡片列同为一行高度（网格拉伸），只要不矮于卡片即视为拉满
+        self.assertGreaterEqual(monitor_box["height"], cards_box["height"])
+        self.assertGreater(monitor_box["height"], 300)
 
     def test_failed_pool_save_shows_error_and_keeps_the_page_usable(self):
         self.fail_save = True
@@ -618,6 +779,9 @@ class WebBrowserTests(unittest.TestCase):
         rows.first.click()
         table = self.page.locator("#myEventsCopyBody .follow-source-table")
         self.expect(table).to_have_count(1)
+        self.expect(table.locator("thead")).to_contain_text("下单时间")
+        self.expect(table).to_contain_text("16:30:00")
+        self.expect(table).to_contain_text("16:30:09")
         self.expect(table).to_contain_text("3835726359")
         self.expect(table).to_contain_text("3835728899")
         self.expect(table).to_contain_text("TLH0R03")

@@ -32,6 +32,78 @@ def pool_config(root: Path):
     }
 
 
+class AutoReloginTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = pool_config(Path(self.tmp.name))
+        self.config.update(
+            pool_auto_relogin=True,
+            pool_relogin_cooldown_seconds=600,
+            pool_double_login_wait_seconds=0.05,
+        )
+        self.service = AccountPoolService(self.config)
+        self.addCleanup(self.service.stop)
+        self.account = self.service.store.save_account(
+            {
+                "platform": "crown_member",
+                "name": "皇冠会员",
+                "base_url": "https://mos022.com",
+                "login_path": "/",
+                "username": "okcodex7778",
+                "env_id": "k1test",
+            }
+        )
+        self.service.store.save_credentials(self.account["id"], "okcodex7778", "secret")
+
+    def test_expired_crown_env_schedules_login(self):
+        self.service.login = mock.Mock(return_value={"message": "ok"})
+        self.service._maybe_auto_relogin(
+            self.account["id"], "expired", "皇冠提示重复登录，请确认该会员是否在其他地方登录"
+        )
+        time.sleep(0.2)
+        self.service.login.assert_called_once_with(self.account["id"], force=False)
+
+    def test_account_without_env_still_recovers(self):
+        # 纯 HTTP 会话不依赖 ADS 环境，掉线也要能自动重登。
+        self.account = self.service.store.save_account(
+            {
+                "platform": "crown_member",
+                "name": "本地会员",
+                "base_url": "https://mos022.com",
+                "login_path": "/",
+                "username": "localonly",
+            }
+        )
+        self.service.store.save_credentials(self.account["id"], "localonly", "secret")
+        self.service.login = mock.Mock(return_value={"message": "ok"})
+        self.service._maybe_auto_relogin(self.account["id"], "expired", "重复登录")
+        time.sleep(0.2)
+        self.service.login.assert_called_once_with(self.account["id"], force=False)
+
+    def test_online_check_does_not_schedule_login(self):
+        self.service.login = mock.Mock()
+        self.service._maybe_auto_relogin(self.account["id"], "online", "在线")
+        time.sleep(0.1)
+        self.service.login.assert_not_called()
+
+    def test_account_without_credentials_is_skipped(self):
+        other = self.service.store.save_account(
+            {
+                "platform": "crown_member",
+                "name": "无凭据",
+                "base_url": "https://mos022.com",
+                "login_path": "/",
+                "username": "nocred",
+                "env_id": "k1other",
+            }
+        )
+        self.service.login = mock.Mock()
+        self.service._maybe_auto_relogin(other["id"], "expired", "会话失效")
+        time.sleep(0.1)
+        self.service.login.assert_not_called()
+
+
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -479,6 +551,92 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("password", encoded)
         self.assertNotIn("storage_state", encoded)
         self.assertNotIn("uid", encoded)
+
+
+class EmptyMemberVersionTests(unittest.TestCase):
+    def test_adspower_restore_and_initialization_use_environment_browser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pool_config(Path(tmp))
+            store = AccountStore(config["pool_db_path"], config)
+            account = store.save_account(
+                {
+                    "platform": "crown_member",
+                    "username": "member-test",
+                    "base_url": "https://member.example.com",
+                    "env_id": "test-env",
+                }
+            )
+            meta = {"uid": "test-uid", "origin": account["base_url"], "browser_env": "yes"}
+            store.save_meta(account["id"], meta)
+            store._write_private(
+                store.paths(account["id"])["storage"],
+                {
+                    "cookies": [
+                        {
+                            "name": "sid",
+                            "value": "saved",
+                            "domain": "member.example.com",
+                            "path": "/",
+                        },
+                    ]
+                },
+            )
+            provider = CrownProvider(config, store, "crown_member")
+            with (
+                mock.patch.object(
+                    provider, "_check_env_browser", return_value=CheckResult("online", "", meta)
+                ) as check,
+                mock.patch.object(provider, "_member_ping") as direct,
+            ):
+                self.assertEqual(provider.login(account).status, "online")
+            check.assert_called_once_with(account)
+            direct.assert_not_called()
+            context, page = mock.Mock(), mock.Mock()
+            provider._initialize_member(context, meta, None, page=page)
+            self.assertEqual(page.evaluate.call_count, 3)
+            context.request.post.assert_not_called()
+
+    def test_member_login_and_check_accept_verified_uid_without_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pool_config(Path(tmp))
+            store = AccountStore(config["pool_db_path"], config)
+            account = store.save_account(
+                {
+                    "platform": "crown_member",
+                    "username": "member-test",
+                    "base_url": "https://member.example.com",
+                }
+            )
+            meta = {"uid": "test-uid", "origin": account["base_url"]}
+            storage = {
+                "cookies": [
+                    {"name": "sid", "value": "saved", "domain": "member.example.com", "path": "/"}
+                ],
+                "origins": [],
+            }
+            provider = CrownProvider(config, store, "crown_member")
+            page = mock.Mock(url=account["base_url"], frames=[])
+            page.is_closed.return_value = False
+            context = mock.Mock(pages=[page])
+            context.storage_state.return_value = storage
+            capture = mock.Mock(meta=meta, fresh_login=True)
+            capture.collect.return_value = meta
+            with (
+                mock.patch.object(
+                    provider, "_launch_profile", return_value=(mock.Mock(), context, page)
+                ),
+                mock.patch("ps38app.account_pool.providers.MemberCapture", return_value=capture),
+                mock.patch.object(provider, "_password_visible", return_value=False),
+                mock.patch.object(provider, "_stable_member", return_value=(meta, storage)),
+                mock.patch.object(provider, "_member_ping", return_value={"status": "online"}),
+            ):
+                result = provider.login(
+                    account, should_stop=mock.Mock(side_effect=[False] * 10 + [True])
+                )
+                self.assertEqual(result.status, "online")
+                self.assertEqual(provider.check(account).status, "online")
+                forms = [call.kwargs["form"] for call in context.request.post.call_args_list]
+                self.assertEqual([form["ver"] for form in forms], ["", "", ""])
 
 
 if __name__ == "__main__":

@@ -95,6 +95,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         server.notify_service.start()
     elif server.notify_error:
         print(f"[warn] {server.notify_error}", flush=True)
+    if server.report_service is not None:
+        server.report_service.start()
+    elif server.report_error:
+        print(f"[warn] {server.report_error}", flush=True)
 
     stopping = False
 
@@ -108,6 +112,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
             server.follow_service.stop()
         if server.notify_service is not None:
             server.notify_service.stop()
+        if server.report_service is not None:
+            server.report_service.stop()
         if server.monitor_service is not None:
             server.monitor_service.stop()
         if pool is not None:
@@ -135,14 +141,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    from ps38app.session import PartnerSession
+    from ps38app.poller import Poller
 
     config = load_config()
-    session = PartnerSession(config, debug=bool(args.debug))
+    poller = Poller(config, debug=bool(args.debug))
+    session = poller.create_session()
     try:
         profile = session.login(
             force=bool(args.force),
             on_status=lambda message: print(f"[login] {message}", flush=True),
+            should_stop=lambda: False,
+            on_tick=lambda: None,
         )
         print(
             f"[login] 会话有效：{profile['user_code']}（userId={profile['user_id']}）", flush=True

@@ -25,9 +25,9 @@
 - 「赛事合并」页：读取皇冠和平博当前赛事，在已绑定联赛内按队名、主客顺序和开赛时间对照；订单只补充统计，支持人工确认和严格自动匹配，映射保存在 `data/fixture_merge.sqlite3`
 - 「联赛库」：内置 243 条来自 hdproc 的已知皇冠 ↔ 平博联赛配对，首次启动导入后持久化；表内可按联赛名/皇冠 ID/平博 ID 搜索、逐条解绑
 - 所有页面共用一套 `page-shell` 公共壳：顶部导航 + 一条全局标题栏（页面名与操作按钮随路由切换），桌面端锁定视口高度，页面内容在壳内滚动、不再整页往下超；底部固定状态栏显示系统状态、系统时间、运行时长、版本号与数据同步状态（`web/modules/statusbar.js`）；窄屏自动回退为普通文档滚动
-- 「PS38 跟单」页：左侧「实时性能看板」展示会员在线／空闲／执行中／掉线、任务队列、累计成功率、处理耗时与当前跟单参数，「会员执行池」列出皇冠会员账号、最近执行与平均耗时；右侧为跟单记录卡片（状态色条、投注单数／金额／方向／水位／错误分类）与「执行日志 / 状态时间线」，可按成功、失败、重试、异常筛选。业务上按主页生成的 8 位批次号处理已确认赛事映射的足球单关（默认允许赛前，可配置为仅滚球），同批次只处理首次快照，后续订单不追加、不重发；跟单服务不额外等待 20 秒，规则关闭时仅记录为“跟单未开启”，不发请求。支持正向／反向、固定金额／合计金额比例、分单（1–50 份，整数均分、可设间隔，全部份成功才算成功、部分成功单独标记）和单场／盘口累计限额；默认展示全部跟单组，可切换仅看有成功回执的订单，也可查处理中、失败和部分成功记录
-- 「号池管理」页：支持 PS38 后台 / 皇冠后台 / 皇冠会员账号的登录、会话保存、单账号与批量心跳检测、启停和清除会话；账号池默认 60 秒检测一次
-- 「消息通知配置」Telegram 机器人：在设置页填写 BOT TOKEN / CHAT ID / 可选代理并启用；新单按旧系统版式推送（🎯 新注单提醒），跟单成功或失败后就地更新同一条消息，并带「跟单结果 / 跟单日志 / 输赢结果 / 跟单报表」四个按钮；支持 Telegram Premium 自定义表情（`<tg-emoji>`，可在设置页开关，发送失败自动回退普通 emoji），配置与送达记录保存在 `data/notify.json`，发送失败自动重试且不影响跟单
+- 「PS38 跟单」页：左侧「实时性能看板」展示会员在线／空闲／执行中／掉线、任务队列、累计成功率、处理耗时与当前跟单参数，「会员执行池」列出皇冠会员账号、最近执行与平均耗时；右侧为跟单记录卡片（状态色条、投注单数／金额／方向／水位／错误分类）与「执行日志 / 状态时间线」，可按成功、失败、重试、异常筛选。业务上以主页 20 秒展示批次定位来单：首单进入跟单服务后开启固定 10 秒待跟单窗口，同批次后续订单并入但不延长倒计时；满 10 秒冻结最终单数与合计金额，生成独立跟单批次号（首个沿用页面 8 位号，之后 `-2`、`-3`），再处理已确认赛事映射的足球单关（默认允许赛前，可配置为仅滚球）。冻结后到达的订单进入下一批重新计时，已处理源单不会重复跟单；规则关闭时仅记录为“跟单未开启”，不发请求。支持正向／反向、固定金额／合计金额比例、分单（1–50 份，整数均分、可设间隔，全部份成功才算成功、部分成功单独标记）和单场／盘口累计限额；默认展示全部跟单组，可切换仅看有成功回执的订单，也可查处理中、失败和部分成功记录
+- 「号池管理」页：支持 PS38 后台 / 皇冠后台 / 皇冠会员账号的登录、会话保存、单账号与批量心跳检测、启停和清除会话；账号池默认 30 秒检测一次
+- 「消息通知配置」Telegram 机器人：在设置页填写 BOT TOKEN / CHAT ID / 可选代理并启用；新单按旧系统版式推送（🎯 新注单提醒），跟单成功或失败后就地更新同一条消息，并带「跟单结果 / 跟单日志 / 输赢结果 / 跟单报表」四个按钮，点击后以弹窗显示短摘要（不再发群消息），其中「输赢结果」会按票号查皇冠历史显示结算盈利；支持 Telegram Premium 自定义表情（`<tg-emoji>`，可在设置页开关，发送失败自动回退普通 emoji），配置与送达记录保存在 `data/notify.json`，发送失败自动重试且不影响跟单
 - 新单到达时页面顶部提示，并自动刷新列表
 
 **没有**
@@ -63,8 +63,8 @@
 
 在 `#/copy` 打开跟单页，点右上角「跟单规则」会跳到「设置」页顶部的规则面板；选择正向或反向、固定金额或比例、分单数量和间隔，保存后按需启用。当前同一时间使用一条全局规则，可按会员筛选来源；执行账号从可用号池自动轮转，每组在一个账号上顺序分单。
 
-- 跟单任务以主页首次显示的 8 位批次号为单位，同一批次只保存首次快照，后续订单不追加、不重发。主页自身的 20 秒聚合只负责生成展示批次，跟单服务不再等待第二个 20 秒窗口。PS38 原单的 THB、RMB、CNY 标签均按人民币计算，例如 `100 THB` 按 100 元计入；金额不换算，原始标签保留在明细中。
-- 固定金额为每组合计处理一次；比例以百分比输入，如 `10` 表示原单合计的 10%。首版使用整币，比例结果向下取整，小于 1 时跳过。
+- 跟单任务以主页 20 秒展示批次为单位：首单进入服务后启动固定 10 秒待跟单窗口，窗口内后续订单并入但不重置倒计时；满 10 秒冻结成员与合计金额，生成独立跟单批次号并交给原有映射、账号、拆单与提交链路。冻结后到达的订单进入下一批重新计时，已处理源单按订单键去重。窗口截止时间与成员保存在 `follow.sqlite3` 的 `follow_pending` 表，重启后按原截止时间恢复。主页自身的 20 秒聚合只负责生成展示批次。PS38 原单的 THB、RMB、CNY 标签均按人民币计算，例如 `100 THB` 按 100 元计入；金额不换算，原始标签保留在明细中。
+- 固定金额为每组合计处理一次；比例以百分比输入，如 `10` 表示原单合计的 10%。首版使用整币，比例结果一律向上取整（99.01→100、100.5→101），避免 99.99 被截成 99 后低于最低投注；取整后小于 1 时跳过。
 - 网络执行由有界后台任务承接，同一账号同时只执行一组；查盘与等待回执期间继续接收新批次。记录显示等待原因、重试次数和下次动作时间。
 - 平台返回码决定换号、等待开盘、重新查盘或停止；单注超限可触发金额拆分。重试次数和期限按错误类型区分，记录会显示具体原因与下次动作时间。
 - “已成功”需要有效的平台成功回执和票号；分单全部成功才算整组成功，部分成功标记为 `PARTIAL`，逐份保存票号。
@@ -92,13 +92,38 @@
 - 密码是可选的：填写后只写入 `data/accounts/<id>/credentials.json`（0600），用于自动填充；留空则每次手动登录。
 - 每个账号在页面上是一张心跳卡片：状态、会话、最近响应/检测、24 格心跳条和登录/检测/清理操作；旧库首次启动会用运行日志回填心跳历史。
 - 号池工作台支持按账号名/域名搜索、按状态筛选，以及默认（主账号优先）/状态/最近检测/账号名称/账号类型排序；卡片区按屏幕宽度自适应，桌面最多 5 列、平板 3 列、手机 1 列。
-- 心跳默认每 60 秒一次（新增账号时可设 15–3600 秒）；「全部检测」逐账号串行检查，避免同时拉起多个浏览器。
+- 心跳默认每 30 秒一次（新增账号时可设 15–3600 秒）；「全部检测」逐账号串行检查，避免同时拉起多个浏览器。
 - 采集器主账号启动时自动登记，登录/检测复用采集器现有会话，不会另开第二个 PS38 浏览器。
-- 会话失效只标记「已失效」，不会自动重登；点行内「登录」先验证已有会员会话，有效时直接恢复；失效时打开浏览器，每次任务最多自动提交一次账号密码，验证码由操作者完成。
-- 皇冠会员登录与 hdproc 对齐的关键步骤：捕获 `chk_login*` 成功响应中的 uid 和真实请求版本/站点 → `memSet/check`、`service_mainget/login=Y`、`get_version` 初始化 → Cookie/uid/ver 连续三次稳定采样 → `get_member_data` 验证 → 保存 Cookie、localStorage、uid/ver/langx、实际 origin 与浏览器 User-Agent。关闭登录浏览器后使用磁盘快照检测，程序重启后仍可复用。
+- 会话失效先标记「已失效」；启用 `pool_auto_relogin` 且已保存凭据时，皇冠会员按冷却时间自动重登。点行内「登录」先验证已有会员会话，有效时直接恢复；需人工完成的验证码仍在登录窗口处理。
+- 皇冠会员登录与 hdproc 对齐的关键步骤：捕获 `chk_login*` 成功响应中的 uid 和真实请求版本/站点 → `memSet/check`、`service_mainget/login=Y`、`get_version` 初始化 → Cookie/uid 连续三次稳定采样（ver 可为空） → `get_member_data` 验证 → 保存 Cookie、localStorage、uid/ver/langx、实际 origin 与浏览器 User-Agent。关闭登录浏览器后使用磁盘快照检测，程序重启后仍可复用。
 - 「已保存」表示本地存在会话快照，「在线」表示本次接口验证通过。网络问题保留快照，明确失效/重复登录则提示重新登录；未通过验证的登录不会覆盖旧快照。
-- 皇冠会员线路可能跳转至 IP 地址，且证书过期或域名不匹配。`pool_crown_ignore_https_errors` 默认 `true`，与 hdproc 的皇冠证书兼容行为一致，仅作用于皇冠浏览器与会员心跳；设为 `false` 可恢复严格证书校验，PS38 的证书校验策略独立。
+- 皇冠会员线路可能跳转至 IP 地址，且证书过期或域名不匹配。`pool_crown_ignore_https_errors` 默认 `true`，与 hdproc 的皇冠证书兼容行为一致，作用于皇冠会员浏览器与皇冠接口请求；设为 `false` 可恢复严格证书校验，PS38 的证书校验策略独立。
 - 皇冠站改版时，调整 `ps38app/account_pool/providers.py` / `member_capture.py` / `crown_member.py`，不影响 PS38 订单采集。
+
+### 从 AdsPower 导入账号
+
+号池页的「ADS 账号导入」会读取本机 AdsPower（默认 `http://localhost:50325`）的环境列表，按环境名解析登录账号与过期日，勾选后批量加入号池：
+
+- 环境绑定写入 `accounts.env_id` / `env_no` / `env_name`，会话后端记为 `adspower`；同一环境只能绑定一个账号（唯一索引保护）。
+- 导入时平台默认「自动识别」：环境名含「平博 / PS38」按 PS38 后台导入，含「皇冠 / 会员 / hga / mos」按皇冠会员导入；站点地址只对皇冠生效，PS38 使用 `config.json` 的 `base_url`。
+- 过期环境（环境名里的 `过期MM-DD`）导入后默认停用；环境名无法识别账号的，需要在导入弹窗里手填登录账号。
+- 代理账号密码只从 AdsPower 读取，`GET /api/adspower/profiles` 只返回脱敏的 IP/端口；本项目库不保存代理密码。
+- **PS38 后台账号**已支持 ADS 环境接管：绑定后采集器默认用 **AdsPower 无头浏览器（`headless=1` + CDP）**，请求带环境的真实 UA/TLS/指纹/代理，但不弹窗口；主账号用 `POST /api/pool/bind-env` 绑定，不另建重复账号。
+- 如果只想用代理 + Cookie、完全不启动浏览器，把 `ps38_transport` 设为 `http`；默认 `browser` 优先保证指纹一致性。
+- **皇冠会员**默认通过 ADS 无头浏览器登录和检测；`crown_transport=http` 时使用环境 SOCKS5 代理，通过 `chk_login` + `get_member_data` 完成纯 HTTP 登录和心跳。会话失效后按冷却时间自动重登，`doubleLogin` 先等待再重登。
+- 皇冠后台（`crown_backend`）的 ADS 环境登录仍未接入；对应按钮保持禁用。
+- 配置项：`adspower_base_url`（默认 `http://localhost:50325`）、`adspower_api_key`（也可用环境变量 `ADSPOWER_KEY`）、`adspower_timeout_seconds`。
+
+### 账号密码 / TOTP 与无人值守登录
+
+号池每张账号卡片新增「凭据」，可保存登录账号、密码和 TOTP 私钥（写入 `data/accounts/<id>/credentials.json`，0600；不会通过接口返回）：
+
+- PS38 自动登录顺序：环境/本地会话有效 → 直接复用；无效 → 账号密码 → 图形验证码 → TOTP → 再校验 profile API。
+- 验证码是唯一需要外部能力的环节：配置 `ps38_captcha_command` 后才会自动识别并提交；未配置时只预填账号密码，验证码/2FA 仍需在环境窗口完成。
+- macOS 可先编译一次内置的 Vision 兜底：`swiftc -O scripts/ocr_captcha.swift -o data/ocr_captcha`，再把 `ps38_captcha_command` 设为 `data/ocr_captcha {image}`。
+- 验证码错误（`INVALID_CAPTCHA`）可安全重试，最多 3 次；密码错误、账号锁定等状态不会重试，直接转人工。
+- 自动登录失败不会反复提交密码；保留环境窗口供人工完成剩余的验证码/2FA。
+- 该 OCR 脚本是 macOS Vision 的实验性兜底，不保证 100% 识别；生产使用建议换成你自己的识别服务/命令。
 
 号池回归验证：
 
@@ -113,6 +138,10 @@ PS38_TEST_BROWSER=1 PLAYWRIGHT_BROWSERS_PATH="$PWD/.playwright-browsers" \
 号池 API（同源、只返回状态，不返回 Cookie/密码）：
 
 - `GET /api/pool`：账号列表、汇总和最近日志
+- `GET /api/adspower/profiles`：AdsPower 环境列表（账号/过期日/绑定状态，代理已脱敏）
+- `POST /api/pool/import-envs`：把所选 ADS 环境导入号池
+- `POST /api/pool/bind-env`：把 ADS 环境绑定到已有账号（含 PS38 主账号）
+- `POST /api/pool/credentials`：保存账号密码 / TOTP（密码 / TOTP 留空保持不变，不返回秘密值）
 - `POST /api/pool/save`：新增账号（可带 `password`，留空则手动登录）
 - `POST /api/pool/login` / `check` / `check-all`：登录、单账号检测、全部检测
 - `POST /api/pool/clear` / `delete` / `toggle` / `cancel`：清除会话、删除、启停、取消任务
@@ -204,7 +233,18 @@ python run.py import-db "/path/to/partner_orders.sqlite3"
 | `base_url` | `https://www.ps38ag.com` | 代理后台地址 |
 | `login_path` | `/partner/zh-cn/login` | 登录页路径 |
 | `dashboard_path` | `/partner-ui-v2/report-outstanding-v2` | 登录后首页；启动时先打开它复用 Cookie（`/partner/` 会 302 到登录页，不能用来判活） |
-| `username` / `password` | 空 | 可选，自动填充用；2FA 仍手动 |
+| `username` / `password` | 空 | 可选，自动填充用；号池凭据可另存 TOTP，未设置时 2FA 手动完成 |
+| `ps38_captcha_command` | 空 | 验证码识别命令，`{image}` 会替换为图片路径；留空则只等人工输入 |
+| `ps38_captcha_timeout` | `30` | 验证码命令超时（秒，5–120） |
+| `ps38_captcha_dir` | `data/captcha` | 验证码图片临时目录（0600 文件） |
+| `ps38_transport` | `browser` | `browser`：无头 AdsPower + CDP（真实指纹）；`http`：纯 HTTP（只代理 + Cookie）；`auto`：绑定环境时走 HTTP |
+| `ps38_http_timeout` | `30` | 纯 HTTP 请求超时（秒，5–120） |
+| `ps38_http_user_agent` | 空 | 纯 HTTP 请求 UA；留空使用 Windows Chrome 默认 UA |
+| `adspower_headless` | `true` | AdsPower 环境无头启动；`false` 才弹窗口 |
+| `follow_parallel_attempts` | `5` | 全局跟单网络任务并发上限（1–20）；同账号仍串行 |
+| `pool_auto_relogin` | `true` | 皇冠会员环境失效后自动重登 |
+| `pool_relogin_cooldown_seconds` | `60` | 同一账号两次自动重登的最小间隔 |
+| `pool_double_login_wait_seconds` | `8` | 遇到 `doubleLogin` 先等待再重登 |
 | `agent_codes` | `[]` | 要拉取的代理代码；留空则自动使用身份树里的全部代理 |
 | `history_from` | `2026-07-01` | 补历史起始日期，也是代理身份树查询起点 |
 | `open_interval_seconds` | `1` | 未结算轮询目标间隔（最低 1 秒） |
@@ -215,6 +255,8 @@ python run.py import-db "/path/to/partner_orders.sqlite3"
 | `browser_channel` | 空 | 空=Playwright Chromium；也可 `chrome` 用本机 Chrome |
 | `minimize_after_login` | `false` | 登录成功后自动最小化窗口 |
 | `backfill_on_first_run` | `true` | 数据库为空时自动补历史 |
+| `crown_transport` | `browser` | `browser`：AdsPower 无头浏览器登录/检测；`http`：纯 HTTP 登录/心跳 |
+| `crown_http_user_agent` | 空 | 皇冠会员纯 HTTP 登录/心跳 UA；留空用 Mac Chrome 155 |
 | `crown_host` / `crown_port` | `127.0.0.1` / `9223` | 本机皇冠赛事服务（仅「赛事合并」使用） |
 | `crown_utc_offset_minutes` | `-240` | 皇冠 `start_label` 的时区偏移（GMT-4） |
 | `merge_db_path` | `data/fixture_merge.sqlite3` | 联赛/赛事映射库，与订单库分开 |
@@ -249,8 +291,9 @@ python run.py import-db "/path/to/partner_orders.sqlite3"
 ## 会话是怎么自己维护的
 
 - 使用独立的 Playwright 持久化浏览器目录 `data/profile`，并在登录成功后额外保存 `data/profile/storage_state.json`（Cookie 快照）。
-- 启动时先复用已有 Cookie，直接请求受保护接口验证；有效就跳过登录。
-- 验证失败才打开登录页；配置了账号密码就只提交一次，然后持续等待 2FA。
+- 如果 PS38 主账号在号池绑定了 AdsPower 环境，采集器默认用 **AdsPower 无头浏览器**：`start(env, headless=1)` + CDP，登录、profile、订单和身份树都由环境浏览器发出，使用真实指纹和代理，只是不显示窗口；`ps38_transport=http` 时才切换为纯 HTTP（只代理 + Cookie）。
+- 启动时先复用 `data/profile/storage_state.json` 的 Cookie，直接请求 profile 接口验证；有效就跳过登录。
+- 验证失败才用账号密码 + 验证码识别 + TOTP 重新登录；密码错误/账号锁定不会自动重试，需保存凭据后点「重登」。
 - 运行中接口返回 401/403 或非 JSON 时，程序把原窗口恢复出来，等待你完成登录/2FA，**不会退出，也不会反复提交密码**。
 - 登录窗口被关闭时，程序每 15 秒重试一次；也可以点页面上的「重新登录」立即重建。
 
@@ -276,7 +319,8 @@ python run.py import-db "/path/to/partner_orders.sqlite3"
 - `GET /api/my-events/events`：新单事件游标
 - `GET /api/status`：采集会话/进度/库统计
 - `GET /api/health`：健康检查
-- `GET /api/follow`：跟单记录、规则、状态统计与可选账号，默认筛选全部（`status` 可指定 `ALL`／`PROCESSING`／`SUCCEEDED`／`FAILED`／`UNKNOWN`）
+- `GET /api/crown-reports`：读取本地皇冠报表明细、按日汇总和同步状态（支持账号、日期范围及条数筛选）
+- `GET /api/follow`：跟单记录、规则、状态统计与可选账号，默认筛选全部（`status` 可指定 `ALL`／`PROCESSING`／`SUCCEEDED`／`FAILED`／`UNKNOWN`）；`service.pending_tasks` 是仍在 10 秒待跟单窗口、尚未冻结的批次数
 - `GET /api/follow/groups/<组编号>`：组内原单、处理尝试、状态历史和分单结果；旧核对审计保留兼容
 
 操作接口（POST）：`/api/actions/refresh`、`/api/actions/backfill`、`/api/actions/login`、`/api/actions/open-login`（把后台浏览器窗口提到前台；窗口被关掉则自动重建且保留 Cookie）。

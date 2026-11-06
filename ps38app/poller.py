@@ -9,12 +9,18 @@ then continues without restarting the app.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import threading
 import time
 import traceback
+from contextlib import closing
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .errors import LoginRejected
+from .ps38_http import Ps38HttpSession
 from .session import LoginWindowClosed, PartnerSession
 from .store import (
     IncompletePage,
@@ -85,6 +91,7 @@ class Poller(threading.Thread):
             "last_settled_at": "",
             "last_cycle_seconds": 0.0,
             "profile": {},
+            "backend": "local",
             "agents": [],
             "poll_count": 0,
             "new_orders": 0,
@@ -109,6 +116,7 @@ class Poller(threading.Thread):
                 "last_settled_at": self.state["last_settled_at"],
                 "last_cycle_seconds": self.state["last_cycle_seconds"],
                 "profile": dict(self.state["profile"]),
+                "backend": self.state["backend"],
                 "agents": list(self.state["agents"]),
                 "poll_count": self.state["poll_count"],
                 "new_orders": self.state["new_orders"],
@@ -209,6 +217,17 @@ class Poller(threading.Thread):
                 self._close_session()
                 if self._stop_event.wait(RETRY_SECONDS):
                     return
+            except LoginRejected as exc:
+                # Wrong password / locked account / captcha solver missing:
+                # retrying every 15s would burn attempts. Park until the
+                # operator saves credentials and clicks 重登.
+                self._set_state(
+                    "error",
+                    f"登录被拒绝：{_short_error(exc)}；保存凭据后点「重登」再试",
+                )
+                self._close_session()
+                while not self._stop_event.is_set() and not self._relogin.is_set():
+                    self._stop_event.wait(1)
             except Exception as exc:  # noqa: BLE001 - supervisor must survive
                 if self.debug:
                     traceback.print_exc()
@@ -219,9 +238,16 @@ class Poller(threading.Thread):
 
     def _service_show_window(self) -> None:
         """Open or focus the browser window; must run in the poller thread."""
+        if self._relogin.is_set():
+            # Also honoured while the login window is waiting for 2FA: a saved
+            # credential change should be able to restart the login immediately.
+            raise ReloginRequested()
         if not self._show_window.is_set():
             return
         self._show_window.clear()
+        if self.session is not None and getattr(self.session, "http_mode", False) is True:
+            self._set_message("HTTP 模式无需浏览器窗口")
+            return
         if self.session is not None and self.session.present_window():
             self._set_message("已打开后台浏览器窗口")
             return
@@ -233,18 +259,44 @@ class Poller(threading.Thread):
         """Keep the same browser window and wait for a manual re-login."""
         if self.session is None:
             raise SessionExpired(str(exc))
-        self._set_state("login", f"会话失效：{_short_error(exc)}；请在浏览器完成登录/2FA")
-        # Bring the login form back; if the cookie is actually still valid the
-        # site redirects to the dashboard and the probe below succeeds.
-        self.session.open_login_page()
-        try:
-            profile = self.session.wait_for_login(
+        if getattr(self.session, "http_mode", False) is True:
+            self._set_state("login", f"会话失效：{_short_error(exc)}；正在 HTTP 重新登录")
+            profile = self.session.login(
                 on_status=lambda message: self._set_state("login", message),
                 should_stop=self._stop_event.is_set,
                 on_tick=self._service_show_window,
             )
-        except SessionExpired:
-            raise
+            self._set_profile(profile)
+            self._set_state("online", f"会话已恢复（{profile['user_code']}）")
+            if not self.agents:
+                self.agents = self._resolve_agents(profile)
+                with self._lock:
+                    self.state["agents"] = [agent["code"] for agent in self.agents]
+                self.store.save_agents(self.agents)
+            return
+        self._set_state("login", f"会话失效：{_short_error(exc)}；请在浏览器完成登录/2FA")
+        # Bring the login form back; if the cookie is actually still valid the
+        # site redirects to the dashboard and the probe below succeeds.
+        self.session.open_login_page()
+        profile = None
+        if (
+            self.session.can_auto_login()
+            and self.session.captcha_command
+            and self.session.try_auto_login(
+                on_status=lambda message: self._set_state("login", message)
+            )
+            is True
+        ):
+            profile = dict(self.session.profile)
+        if profile is None:
+            try:
+                profile = self.session.wait_for_login(
+                    on_status=lambda message: self._set_state("login", message),
+                    should_stop=self._stop_event.is_set,
+                    on_tick=self._service_show_window,
+                )
+            except SessionExpired:
+                raise
         self._set_profile(profile)
         self._set_state("online", f"会话已恢复（{profile['user_code']}）")
         if not self.agents:
@@ -255,18 +307,82 @@ class Poller(threading.Thread):
 
     # ── connection / login ────────────────────────────────────────────────
 
+    def _primary_env_id(self) -> str:
+        """Read the primary account's AdsPower binding from the pool database."""
+        db_path = str(self.config.get("pool_db_path") or "").strip()
+        if not db_path:
+            return ""
+        try:
+            uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=2)) as connection:
+                row = connection.execute(
+                    "SELECT env_id FROM accounts WHERE id='primary-ps38'"
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            return ""
+        return str(row[0] or "") if row else ""
+
+    def _primary_credentials(self) -> Dict[str, str]:
+        """Read the primary account's saved credentials (0600, local only)."""
+        raw_dir = str(self.config.get("pool_dir") or "data/accounts")
+        path = Path(raw_dir) / "primary-ps38" / "credentials.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {key: str(payload.get(key) or "") for key in ("username", "password", "totp_secret")}
+
+    def refresh_credentials(self) -> None:
+        """Apply credentials saved by the dashboard to the live session."""
+        session = self.session
+        if session is None:
+            return
+        credentials = self._primary_credentials()
+        if credentials.get("username"):
+            session.username = credentials["username"]
+        if credentials.get("password"):
+            session.password = credentials["password"]
+        if "totp_secret" in credentials:
+            session.totp_secret = credentials["totp_secret"]
+
+    def create_session(self):
+        """Construct the primary session using the shared pool credentials and transport rules."""
+        env_id = self._primary_env_id()
+        session_config = dict(self.config)
+        if env_id:
+            session_config["adspower_env_id"] = env_id
+        credentials = self._primary_credentials()
+        if credentials.get("username"):
+            session_config["username"] = credentials["username"]
+        if credentials.get("password"):
+            session_config["password"] = credentials["password"]
+        session_config["totp_secret"] = credentials.get("totp_secret") or ""
+        transport = str(self.config.get("ps38_transport") or "auto").lower()
+        use_http = transport == "http" or (transport == "auto" and bool(env_id))
+        with self._lock:
+            self.state["backend"] = "http" if use_http else ("adspower" if env_id else "local")
+        session = (
+            Ps38HttpSession(session_config, debug=self.debug)
+            if use_http
+            else PartnerSession(session_config, debug=self.debug)
+        )
+        return session
+
     def _open_session(self) -> None:
         self._set_state("starting", "正在连接后台会话…")
         self._close_session()
-        session = PartnerSession(self.config, debug=self.debug)
+        session = self.create_session()
         self.session = session
+        force_login = self._relogin.is_set()
+        self._relogin.clear()
         profile = session.login(
-            force=self._relogin.is_set(),
+            force=force_login,
             on_status=lambda message: self._set_state("login", message),
             should_stop=self._stop_event.is_set,
             on_tick=self._service_show_window,
         )
-        self._relogin.clear()
         self._set_profile(profile)
         self._set_state("online", f"会话在线（{profile['user_code']}）")
 
@@ -277,8 +393,7 @@ class Poller(threading.Thread):
         self.store.save_agents(agents)
         self._set_state("online", f"已连接 {profile['user_code']}，代理 {len(agents)} 个")
 
-        if (self.config.get("backfill_on_first_run", True)
-                and not self.store.has_orders()):
+        if self.config.get("backfill_on_first_run", True) and not self.store.has_orders():
             self._backfill_requested.set()
             self._set_message("首次运行：准备补采历史订单…")
 
@@ -309,9 +424,13 @@ class Poller(threading.Thread):
                         continue
                     code = row.get("userCode")
                     user_id = row.get("userId")
-                    if (not isinstance(code, str) or not code.strip()
-                            or isinstance(user_id, bool) or not isinstance(user_id, int)
-                            or user_id <= 0):
+                    if (
+                        not isinstance(code, str)
+                        or not code.strip()
+                        or isinstance(user_id, bool)
+                        or not isinstance(user_id, int)
+                        or user_id <= 0
+                    ):
                         continue
                     found[code.strip()] = {
                         "code": code.strip(),
@@ -331,8 +450,7 @@ class Poller(threading.Thread):
             for code in missing:
                 if code in saved_by_code:
                     agents.append(saved_by_code[code])
-            missing = [code for code in wanted
-                       if code not in {agent["code"] for agent in agents}]
+            missing = [code for code in wanted if code not in {agent["code"] for agent in agents}]
             if missing:
                 self._set_message(f"未找到代理：{', '.join(missing)}（已跳过）")
         else:
@@ -385,17 +503,23 @@ class Poller(threading.Thread):
         for agent in self.agents:
             try:
                 rows, requests = self.fetch_status(agent, "OPEN")
-                result = self.store.commit_snapshot(agent["code"], "OPEN", rows, {
-                    "started_at": started,
-                    "finished_at": now_iso(),
-                    "elapsed_seconds": time.monotonic() - begin,
-                    "request_count": requests,
-                })
+                result = self.store.commit_snapshot(
+                    agent["code"],
+                    "OPEN",
+                    rows,
+                    {
+                        "started_at": started,
+                        "finished_at": now_iso(),
+                        "elapsed_seconds": time.monotonic() - begin,
+                        "request_count": requests,
+                    },
+                )
                 if result["new"] or result["events"]:
                     with self._lock:
                         self.state["new_orders"] += result["new"]
-                    message = (f"新单 {result['new']} 笔 · {agent['code']} · "
-                               f"未结算 {result['records']} 笔")
+                    message = (
+                        f"新单 {result['new']} 笔 · {agent['code']} · 未结算 {result['records']} 笔"
+                    )
                     print(f"[poll] {message}", flush=True)
                     self._set_message(message)
             except SessionExpired:
@@ -425,12 +549,17 @@ class Poller(threading.Thread):
                 rows, requests = self.fetch_status(
                     agent, "SETTLED", begin.isoformat(), end.isoformat()
                 )
-                self.store.commit_snapshot(agent["code"], "SETTLED", rows, {
-                    "started_at": started,
-                    "finished_at": now_iso(),
-                    "elapsed_seconds": time.monotonic() - settle_start,
-                    "request_count": requests,
-                })
+                self.store.commit_snapshot(
+                    agent["code"],
+                    "SETTLED",
+                    rows,
+                    {
+                        "started_at": started,
+                        "finished_at": now_iso(),
+                        "elapsed_seconds": time.monotonic() - settle_start,
+                        "request_count": requests,
+                    },
+                )
             except SessionExpired:
                 raise
             except LoginWindowClosed:
@@ -444,9 +573,13 @@ class Poller(threading.Thread):
 
     # ── pagination ────────────────────────────────────────────────────────
 
-    def fetch_status(self, agent: Dict[str, Any], status: str,
-                     from_date: Optional[str] = None,
-                     to_date: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
+    def fetch_status(
+        self,
+        agent: Dict[str, Any],
+        status: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
         """Read and validate every page of one status query."""
         page_size = int(self.config["page_size"])
         records: List[Dict[str, Any]] = []
@@ -529,12 +662,17 @@ class Poller(threading.Thread):
             rows, requests = self.fetch_status(
                 agent, "SETTLED", chunk_start.isoformat(), chunk_end.isoformat()
             )
-            result = self.store.commit_snapshot(agent["code"], "SETTLED", rows, {
-                "started_at": started,
-                "finished_at": now_iso(),
-                "elapsed_seconds": time.monotonic() - begin,
-                "request_count": requests,
-            })
+            result = self.store.commit_snapshot(
+                agent["code"],
+                "SETTLED",
+                rows,
+                {
+                    "started_at": started,
+                    "finished_at": now_iso(),
+                    "elapsed_seconds": time.monotonic() - begin,
+                    "request_count": requests,
+                },
+            )
             message = f"{text} 记录 {result['records']}，新增 {result['new']}"
         except SessionExpired:
             # Push the chunk back and let the supervisor re-login.

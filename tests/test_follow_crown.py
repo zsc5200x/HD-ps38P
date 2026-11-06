@@ -1,6 +1,7 @@
 """皇冠适配器只使用临时号池与模拟响应，不访问实际站点。"""
 
 import json
+import pathlib
 import tempfile
 import threading
 import unittest
@@ -16,6 +17,7 @@ from ps38app.crown_fixtures import parse_games
 from ps38app.fixture_merge import prepare_crown_event
 from ps38app.follow.crown import CrownAdapter
 from ps38app.follow.crown_markets import (
+    FollowPreparationError,
     encode_line,
     game_rows,
     mapped_game,
@@ -224,6 +226,8 @@ class MarketParsingTests(unittest.TestCase):
             {"chose_team": "C"},
             {"ioratio": "0"},
             {"ptype": "角球"},
+            {"team_name_h": "其他主队"},
+            {"team_id_h": "other-team"},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 verify_context(response({**context, **changes}), quote)
@@ -276,6 +280,149 @@ class MarketParsingTests(unittest.TestCase):
                 self.assertEqual(result["retryable"], action != "stop")
                 self.assertEqual(result["error_code"], code)
 
+    def test_ambiguity_is_retryable_but_score_change_is_not(self):
+        base = {
+            "mode": "FT",
+            "sw_rou": "Y",
+            "score_h": "0",
+            "score_c": "0",
+            "ratio_rouo": "2",
+            "ior_rouc": "0.75",
+            "master": "Y",
+        }
+        game = {"gid": "1", "team_h": "A", "team_c": "B"}
+        intent = {
+            "market_type": "TOTAL",
+            "side": "OVER",
+            "line": "2",
+            "period": "FT",
+            "score": "0:0",
+            "is_live": True,
+        }
+        with self.assertRaises(FollowPreparationError) as ambiguous:
+            select_market([{**base, "gid": "1"}, {**base, "gid": "2"}], game, intent)
+        self.assertEqual(ambiguous.exception.category, "MARKET_AMBIGUOUS")
+        self.assertTrue(ambiguous.exception.retryable)
+
+        changed = {**base, "score_h": "1", "gid": "3"}
+        with self.assertRaises(FollowPreparationError) as score:
+            select_market([changed], game, intent)
+        self.assertEqual(score.exception.category, "SCORE_CHANGED")
+        self.assertFalse(score.exception.retryable)
+
+    def test_traditional_chinese_team_name_is_not_a_mismatch(self):
+        # 皇冠译名会变（雷昂內斯 / 雷昂内斯），有队伍 ID 时按 ID 比对。
+        quote = {
+            "rtype": "ROUC",
+            "con": "1",
+            "ratio": "50",
+            "gid": "9180921",
+            "chose_team": "C",
+            "wtype": "ROU",
+            "home": "亚拉克莱恩斯",
+            "away": "雷昂內斯",
+            "line": "1.25",
+            "side": "OVER",
+            "market_type": "TOTAL",
+            "period": "FT",
+            "score": "0:0",
+            "odds": "0.88",
+            "team_h_id": "103895",
+            "team_c_id": "123222",
+        }
+        body = response(
+            {
+                "code": "501",
+                "con": "1",
+                "ratio": "50",
+                "ioratio": "0.88",
+                "gid": "9180921",
+                "wtype": "ROU",
+                "chose_team": "C",
+                "team_name_h": "亚拉克莱恩斯",
+                "team_name_c": "雷昂内斯",
+                "team_id_h": "103895",
+                "team_id_c": "123222",
+            }
+        )
+        confirmed = verify_context(body, quote)
+        self.assertEqual(confirmed["odds"], "0.88")
+
+    def test_duplicate_line_prefers_master_row(self):
+        # 主盘与附加盘报同一条线时，必须优先主盘（master=Y）。
+        base = {
+            "mode": "FT",
+            "sw_rou": "Y",
+            "score_h": "0",
+            "score_c": "0",
+            "ratio_rouo": "2",
+            "ior_rouc": "0.75",
+        }
+        rows = [
+            {**base, "gid": "main", "master": "Y"},
+            {**base, "gid": "alt", "master": "N"},
+        ]
+        game = {"gid": "1", "team_h": "古晋城", "team_c": "江原"}
+        intent = {
+            "market_type": "TOTAL",
+            "side": "OVER",
+            "line": "2",
+            "period": "FT",
+            "score": "0:0",
+            "is_live": True,
+        }
+        quote = select_market(rows, game, intent)
+        self.assertEqual(quote["gid"], "main")
+        self.assertEqual(quote["master"], "Y")
+
+    def test_order_view_never_sends_rtype(self):
+        # 滚球/赛前的 FT_order_view 带上 rtype 一律返回 VariableStandard。
+        calls = []
+
+        class Recorder:
+            def __init__(self):
+                self.prepared = []
+
+            def validate_account(self, account_id, currency):
+                return None
+
+            def prepare(self, mapping, intent, account_id):
+                calls.append(intent)
+                return {
+                    "gid": "1",
+                    "master_gid": "1",
+                    "period": "FT",
+                    "market_type": "TOTAL",
+                    "side": "OVER",
+                    "line": "3",
+                    "score": "",
+                    "currency": "CNY",
+                    "account_id": account_id,
+                    "odds": "0.95",
+                    "odds_format": "HK",
+                    "obtained_at": 1.0,
+                    "quote_id": "q",
+                    "wtype": "ROU",
+                    "rtype": "ROUC",
+                    "chose_team": "C",
+                    "con": "4",
+                    "ratio": "0",
+                    "is_live": True,
+                }
+
+            def submit(self, quote, stake, account_id):
+                return {
+                    "status": "SUCCEEDED",
+                    "receipt_id": "T1",
+                    "retryable": False,
+                    "message": "ok",
+                    "request_sent": True,
+                }
+
+        source = pathlib.Path("ps38app/follow/crown.py").read_text(encoding="utf-8")
+        self.assertNotIn('order_view["rtype"]', source)
+        self.assertIn('"p": "FT_order_view"', source)
+
     def test_bet_rejected_with_ticket_is_never_a_success(self):
         result = parse_receipt(
             response({"code": "bet_rejected", "ticket_id": "T-9", "errormsg": "bet_rejected"})
@@ -323,21 +470,42 @@ class PrematchMarketTests(unittest.TestCase):
 
     def row(self, **over):
         data = {
-            "mode": "FT", "gid": "9170085", "hgid": "9170086",
-            "sw_r": "Y", "ratio": "0 / 0.5", "ior_rh": "0.900", "ior_rc": "0.940",
-            "strong": "H", "hstrong": "H",
-            "sw_ou": "Y", "ratio_o": "2 / 2.5", "ratio_u": "2 / 2.5",
-            "ior_ouh": "0.970", "ior_ouc": "0.790",
-            "sw_hr": "Y", "hratio": "0 / 0.5", "ior_hrh": "0.820", "ior_hrc": "0.940",
-            "sw_hou": "Y", "ratio_ho": "1", "ratio_hu": "1",
-            "ior_houh": "0.800", "ior_houc": "0.900",
+            "mode": "FT",
+            "gid": "9170085",
+            "hgid": "9170086",
+            "sw_r": "Y",
+            "ratio": "0 / 0.5",
+            "ior_rh": "0.900",
+            "ior_rc": "0.940",
+            "strong": "H",
+            "hstrong": "H",
+            "sw_ou": "Y",
+            "ratio_o": "2 / 2.5",
+            "ratio_u": "2 / 2.5",
+            "ior_ouh": "0.970",
+            "ior_ouc": "0.790",
+            "sw_hr": "Y",
+            "hratio": "0 / 0.5",
+            "ior_hrh": "0.820",
+            "ior_hrc": "0.940",
+            "sw_hou": "Y",
+            "ratio_ho": "1",
+            "ratio_hu": "1",
+            "ior_houh": "0.800",
+            "ior_houc": "0.900",
         }
         data.update(over)
         return data
 
     def intent(self, market, side, line, period="FT"):
-        return {"is_live": False, "period": period, "market_type": market,
-                "side": side, "line": line, "score": ""}
+        return {
+            "is_live": False,
+            "period": period,
+            "market_type": market,
+            "side": side,
+            "line": line,
+            "score": "",
+        }
 
     def game(self):
         return {"gid": "9170085", "lid": "l1", "ecid": "", "team_h": "主", "team_c": "客"}
@@ -360,8 +528,12 @@ class PrematchMarketTests(unittest.TestCase):
     def test_prematch_half_time_uses_hratio_and_hou(self):
         total = select_market([self.row()], self.game(), self.intent("TOTAL", "OVER", "1", "HT"))
         self.assertEqual((total["gid"], total["wtype"], total["rtype"]), ("9170086", "HOU", "HOUC"))
-        handicap = select_market([self.row()], self.game(), self.intent("HANDICAP", "HOME", "-0.25", "HT"))
-        self.assertEqual((handicap["gid"], handicap["wtype"], handicap["rtype"]), ("9170086", "HR", "HRH"))
+        handicap = select_market(
+            [self.row()], self.game(), self.intent("HANDICAP", "HOME", "-0.25", "HT")
+        )
+        self.assertEqual(
+            (handicap["gid"], handicap["wtype"], handicap["rtype"]), ("9170086", "HR", "HRH")
+        )
 
     def test_prematch_handicap_uses_1m_marker_and_sizes(self):
         # 皇冠下注来源标记：让球用 1M，大小用 1R。
@@ -375,15 +547,33 @@ class PrematchMarketTests(unittest.TestCase):
 
     def test_prematch_verification_accepts_missing_rtype(self):
         quote = {
-            "rtype": "OUC", "con": "3", "ratio": "-50", "gid": "9141879",
-            "chose_team": "C", "wtype": "OU", "home": "PSV", "away": "布鲁日",
-            "line": "3.25", "side": "OVER", "market_type": "TOTAL", "period": "FT",
-            "score": "", "odds": "0.750", "master_gid": "9141877",
+            "rtype": "OUC",
+            "con": "3",
+            "ratio": "-50",
+            "gid": "9141879",
+            "chose_team": "C",
+            "wtype": "OU",
+            "home": "PSV",
+            "away": "布鲁日",
+            "line": "3.25",
+            "side": "OVER",
+            "market_type": "TOTAL",
+            "period": "FT",
+            "score": "",
+            "odds": "0.750",
+            "master_gid": "9141877",
         }
-        body = response({
-            "code": "501", "con": "3", "ratio": "-50", "ioratio": "0.76",
-            "gid": "9141879", "wtype": "OU", "chose_team": "C",
-        })
+        body = response(
+            {
+                "code": "501",
+                "con": "3",
+                "ratio": "-50",
+                "ioratio": "0.76",
+                "gid": "9141879",
+                "wtype": "OU",
+                "chose_team": "C",
+            }
+        )
         confirmed = verify_context(body, quote)
         self.assertEqual(confirmed["odds"], "0.76")
 
@@ -398,7 +588,9 @@ class PrematchMarketTests(unittest.TestCase):
 
     def test_closed_prematch_market_is_not_selected(self):
         with self.assertRaises(ValueError):
-            select_market([self.row(sw_r="N")], self.game(), self.intent("HANDICAP", "HOME", "-0.25"))
+            select_market(
+                [self.row(sw_r="N")], self.game(), self.intent("HANDICAP", "HOME", "-0.25")
+            )
 
 
 class AdapterTests(unittest.TestCase):
@@ -468,6 +660,165 @@ class AdapterTests(unittest.TestCase):
         for private in ("fixture-uid", "fixture-ver", "fixture=cookie", "https://example.test"):
             self.assertNotIn(private, public)
 
+    def test_find_history_wager_matches_ticket_across_dates(self):
+        def transport(url, fields, headers, timeout):
+            self.calls.append(dict(fields))
+            action = fields["p"]
+            if action == "get_history_data":
+                return 200, (
+                    "<serverresponse><history><date>2026-11-05</date>"
+                    "<date>2026-11-04</date></history></serverresponse>"
+                ).encode()
+            if action == "history_switch":
+                if fields["today_gmt"] != "2026-11-05":
+                    return 200, b"<serverresponse><code>609</code></serverresponse>"
+                return 200, (
+                    '<serverresponse><code>609</code><wagers tid="OU123">'
+                    "<w_id>OU123</w_id><league>测试杯</league>"
+                    "<team_h_show>主队</team_h_show><team_c_show>客队</team_c_show>"
+                    "<ioratio>0.91</ioratio><gold>123</gold><win_gold>112.7</win_gold>"
+                    "<result_data>4 - 0</result_data></wagers></serverresponse>"
+                ).encode()
+            raise AssertionError(action)
+
+        self.adapter._transport = transport
+        wager = self.adapter.find_history_wager("test-account", "123")
+        self.assertEqual(wager["league"], "测试杯")
+        self.assertEqual(wager["win_gold"], "112.7")
+        self.assertEqual(wager["date"], "2026-11-05")
+
+    def test_find_today_wager_matches_gid_and_stake(self):
+        def transport(url, fields, headers, timeout):
+            self.calls.append(dict(fields))
+            if fields["p"] != "get_today_wagers":
+                raise AssertionError(fields["p"])
+            payload = {
+                "count": 3,
+                "wagers": [
+                    {"w_id": "OLD-1", "gid": "other", "gold": "100", "ioratio": "0.80"},
+                    {"w_id": "W-9", "gid": "line-1", "gold": "100", "ioratio": "0.91"},
+                    {"w_id": "W-8", "gid": "line-1", "gold": "50", "ioratio": "0.90"},
+                ],
+            }
+            return 200, json.dumps(payload).encode()
+
+        self.adapter._transport = transport
+        wager = self.adapter.find_today_wager(
+            "test-account", "line-1", "100", excluded_tickets={"OLD-1"}
+        )
+        self.assertEqual(wager["w_id"], "W-9")
+
+    def test_today_wager_reconciliation_requires_baseline_and_unique_exact_new_ticket(self):
+        wagers = [{"w_id": "OLD", "gid": "line-1", "gold": "100", "ioratio": "0.91"}]
+
+        def transport(url, fields, headers, timeout):
+            return 200, json.dumps({"count": len(wagers), "wagers": wagers}).encode()
+
+        self.adapter._transport = transport
+        self.assertIsNone(self.adapter.find_today_wager("test-account", "line-1", "100"))
+        baseline = self.adapter.today_wager_ids("test-account")
+        self.assertEqual(baseline, {"OLD"})
+        self.assertIsNone(
+            self.adapter.find_today_wager(
+                "test-account", "line-1", "100", excluded_tickets=baseline
+            )
+        )
+        wagers.append({"w_id": "DECIMAL", "gid": "line-1", "gold": "100.9"})
+        self.assertIsNone(
+            self.adapter.find_today_wager(
+                "test-account", "line-1", "100", excluded_tickets=baseline
+            )
+        )
+        wagers.extend(
+            [
+                {"w_id": "NEW-1", "gid": "line-1", "gold": "100"},
+                {"w_id": "NEW-2", "gid": "line-1", "gold": "100"},
+            ]
+        )
+        self.assertIsNone(
+            self.adapter.find_today_wager(
+                "test-account", "line-1", "100", excluded_tickets=baseline
+            )
+        )
+
+    def test_today_wager_baseline_rejects_truncated_or_invalid_lists(self):
+        for payload in (
+            {},
+            {"wagers": [], "count": 1},
+            {"wagers": [{"gid": "line-1"}], "count": 1},
+        ):
+            with self.subTest(payload=payload):
+                self.adapter._transport = lambda *_args: (200, json.dumps(payload).encode())
+                with self.assertRaises(ValueError):
+                    self.adapter.today_wager_ids("test-account")
+
+    def test_variable_standard_triggers_warmup_then_verifies(self):
+        views = {"count": 0}
+
+        def transport(url, fields, headers, timeout):
+            self.calls.append(dict(fields))
+            action = fields["p"]
+            if action == "get_member_data":
+                return 200, response({"enable": "Y", "currency": "CNY"})
+            if action == "get_game_more":
+                return 200, games_xml([BOARD])
+            if action in {"right_menu", "sport_menu", "order"}:
+                return 200, response({"code": "ok"})
+            if action == "FT_order_view":
+                views["count"] += 1
+                if views["count"] == 1:
+                    return 200, b"VariableStandard"
+                return 200, response(
+                    {
+                        "code": "501",
+                        "fast_check": "REH",
+                        "concede": "1",
+                        "ratio": "100",
+                        "ioratio": "0.89",
+                    }
+                )
+            raise AssertionError(action)
+
+        self.adapter._transport = transport
+        quote = self.prepare()
+        self.assertEqual(views["count"], 2)
+        actions = [item["p"] for item in self.calls]
+        self.assertEqual(
+            actions,
+            [
+                "get_member_data",
+                "get_game_more",
+                "FT_order_view",
+                "right_menu",
+                "sport_menu",
+                "order",
+                "FT_order_view",
+            ],
+        )
+        self.assertNotEqual(quote.get("verified"), False)
+        sport_menu = next(item for item in self.calls if item["p"] == "sport_menu")
+        self.assertEqual((sport_menu["gtype"], sport_menu["showtype"]), ("ft", "live"))
+
+    def test_variable_standard_retries_instead_of_blind_submit(self):
+        def transport(url, fields, headers, timeout):
+            self.calls.append(dict(fields))
+            action = fields["p"]
+            if action == "get_member_data":
+                return 200, response({"enable": "Y", "currency": "CNY"})
+            if action == "get_game_more":
+                return 200, games_xml([BOARD])
+            if action in {"right_menu", "sport_menu", "order"}:
+                return 200, response({"code": "ok"})
+            if action == "FT_order_view":
+                return 200, b"VariableStandard"
+            raise AssertionError(action)
+
+        self.adapter._transport = transport
+        with self.assertRaises(FollowPreparationError) as raised:
+            self.prepare()
+        self.assertEqual(raised.exception.category, "VARIABLE_STANDARD")
+        self.assertTrue(raised.exception.retryable)
+
     def test_legacy_mapping_without_ecid_is_rejected_without_live_list_lookup(self):
         legacy = {
             **MAPPING,
@@ -529,8 +880,16 @@ class AdapterTests(unittest.TestCase):
             if fields["p"] == "get_game_more":
                 return 200, games_xml([no_score_board])
             if fields["p"] == "FT_order_view":
-                return 200, response({"code": "501", "fast_check": "REH", "concede": "1", "ratio": "100",
-                                      "ioratio": "0.89", "score": "0:0"})
+                return 200, response(
+                    {
+                        "code": "501",
+                        "fast_check": "REH",
+                        "concede": "1",
+                        "ratio": "100",
+                        "ioratio": "0.89",
+                        "score": "0:0",
+                    }
+                )
             return 200, response({})
 
         self.adapter._transport = transport
@@ -545,8 +904,16 @@ class AdapterTests(unittest.TestCase):
         def transport(url, fields, headers, timeout):
             self.calls.append(dict(fields))
             if fields["p"] == "FT_order_view":
-                return 200, response({"code": "501", "fast_check": "REH", "concede": "1", "ratio": "100",
-                                      "ioratio": "0.89", "score": "1:0"})
+                return 200, response(
+                    {
+                        "code": "501",
+                        "fast_check": "REH",
+                        "concede": "1",
+                        "ratio": "100",
+                        "ioratio": "0.89",
+                        "score": "1:0",
+                    }
+                )
             return self.transport(url, fields, headers, timeout)
 
         self.adapter._transport = transport
@@ -628,12 +995,14 @@ class AdapterTests(unittest.TestCase):
         def slow_transport(url, fields, headers, timeout):
             timeouts.append(timeout)
             self.elapsed += 4
+            if len(timeouts) == 3:
+                self.elapsed += 20
             return self.transport(url, fields, headers, timeout)
 
         self.adapter._transport = slow_transport
         with self.assertRaises(ValueError):
             self.prepare()
-        self.assertEqual(timeouts, [5, 5, 2])
+        self.assertEqual(timeouts, [10, 10, 10])
         self.assertEqual(
             [item["p"] for item in self.calls],
             ["get_member_data", "get_game_more", "FT_order_view"],
@@ -711,7 +1080,7 @@ class AdapterTests(unittest.TestCase):
         opener = SimpleNamespace(open=lambda *_args, **_kwargs: reply)
         with self.assertRaises(ValueError):
             adapter._post(SESSION, {"p": "get_member_data"}, opener)
-        self.assertEqual(timeouts, [5, 3, 1])
+        self.assertEqual(timeouts, [10, 8, 6, 4, 2])
         self.assertTrue(reply.closed)
 
     def test_stale_modified_wrong_account_and_fractional_stake_never_post(self):
@@ -782,6 +1151,14 @@ class AdapterTests(unittest.TestCase):
             adapter = CrownAdapter(config)
             self.assertEqual(adapter.validate_account(account_id, "CNY")["id"], account_id)
             self.assertEqual(adapter.available_accounts(), [account_id])
+            with store._db() as db:
+                db.execute("UPDATE accounts SET env_id=? WHERE id=?", ("test-env", account_id))
+                self.assertEqual(db.execute("SELECT env_id FROM accounts WHERE id=?", (account_id,)).fetchone()[0], "test-env")
+            with patch("ps38app.follow.crown.AdsPowerClient") as ads:
+                ads.return_value.proxy.side_effect = RuntimeError("not available")
+                with self.assertRaisesRegex(ValueError, "环境代理无法读取"):
+                    adapter.validate_account(account_id, "CNY")
+                self.assertEqual(adapter.available_accounts(), [])
             store.set_status(account_id, "expired", "测试失效")
             self.assertEqual(adapter.available_accounts(), [])
             with self.assertRaises(ValueError):
@@ -845,7 +1222,9 @@ class WarmupBetTests(unittest.TestCase):
                 order.append("warmup" if self.count == 1 else "bet")
 
             def getresponse(self):
-                return FakeResponse(b"<serverresponse><code>560</code><ticket_id>T-1</ticket_id></serverresponse>")
+                return FakeResponse(
+                    b"<serverresponse><code>560</code><ticket_id>T-1</ticket_id></serverresponse>"
+                )
 
             def close(self):
                 pass
@@ -858,6 +1237,65 @@ class WarmupBetTests(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertIn(b"ticket_id", body)
         self.assertEqual(order, ["connect", "warmup", "bet"])
+
+    def test_bound_proxy_is_used_for_read_warmup_and_single_bet_with_cookie_updates(self):
+        from email.message import Message
+        from http.cookiejar import CookieJar
+        from ps38app.net import HttpResponse
+        from urllib.request import HTTPCookieProcessor
+
+        proxy = {"host": "127.0.0.1", "port": "1080"}
+        session = {**SESSION, "proxy": proxy}
+        calls = []
+        adapter = CrownAdapter({})
+        opener = SimpleNamespace(handlers=[HTTPCookieProcessor(CookieJar())])
+
+        class Reply:
+            status = 200
+
+            def read(self, _limit=None):
+                return response({"code": "560", "ticket_id": "PROXY-1"})
+
+            def info(self):
+                headers = Message()
+                headers.add_header("Set-Cookie", "warm=two; Path=/")
+                return headers
+
+        class Connection:
+            def connect(self):
+                calls.append(("connect", None))
+
+            def request(self, method, path, body=None, headers=None):
+                action = parse_qs(body.decode())["p"][0]
+                calls.append((action, headers.get("Cookie")))
+
+            def getresponse(self):
+                return Reply()
+
+            def close(self):
+                pass
+
+        with (
+            patch("ps38app.follow.crown.HttpClient") as client,
+            patch("ps38app.follow.crown._SocksConnection", return_value=Connection()) as connection,
+            patch("ps38app.follow.crown.http.client.HTTPSConnection") as direct,
+        ):
+            client.return_value.request.return_value = HttpResponse(
+                200, {"set-cookie": ["context=one; Path=/"]}, b"ok"
+            )
+            adapter._post(session, {"p": "FT_order_view"}, opener)
+            body, failure = adapter._post_bet(
+                session, {"p": "FT_bet", "golds": "100"}, opener, adapter._monotonic() + 5
+            )
+            self.assertIsNone(failure)
+            self.assertIn(b"PROXY-1", body)
+            self.assertEqual(client.call_args.kwargs["proxy"], proxy)
+            self.assertEqual(connection.call_args.kwargs["proxy"], proxy)
+            direct.assert_not_called()
+        self.assertEqual([action for action, _ in calls], ["connect", "get_member_data", "FT_bet"])
+        self.assertIn("context=one", calls[1][1])
+        self.assertIn("context=one", calls[2][1])
+        self.assertIn("warm=two", calls[2][1])
 
 
 class LocalTransportTests(unittest.TestCase):

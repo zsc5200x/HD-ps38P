@@ -13,6 +13,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -162,6 +163,17 @@ def _signed_line(value: Any) -> str:
     return "0"
 
 
+def _plain(value: Any) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", str(value or ""))).strip()
+
+
+def _clip(text: str, limit: int = 180) -> str:
+    text = re.sub(r"\n{3,}", "\n\n", str(text or "").strip())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def _selection(row: Dict[str, Any]) -> str:
     side = str(row.get("target_side") or row.get("source_side") or "")
     line = row.get("target_line") if row.get("target_line") is not None else row.get("source_line")
@@ -221,15 +233,53 @@ def _icon(theme: Optional[Dict[str, Any]], key: str, fallback: str) -> str:
     return _tag(emoji_id, fallback)
 
 
-def _divider(theme: Optional[Dict[str, Any]]) -> str:
+_ORDER_DIVIDER_FALLBACKS = ("🇪🇸", "🇪🇸", "🇪🇸", "🏴", "🏴", "🏴", "🏴", "🇩🇪", "🇫🇷", "🇩🇪")
+
+
+def _divider(theme: Optional[Dict[str, Any]], limit: Optional[int] = None) -> str:
     if not theme:
         return DIVIDER
-    tags = [_tag(emoji_id, "🏁") for emoji_id in (theme.get("divider") or [])]
+    ids = list(theme.get("divider") or [])
+    if limit:
+        ids = ids[:limit]
+    tags = []
+    for index, emoji_id in enumerate(ids):
+        fallback = (
+            _ORDER_DIVIDER_FALLBACKS[index] if index < len(_ORDER_DIVIDER_FALLBACKS) else "🏁"
+        )
+        tags.append(_tag(emoji_id, fallback))
     return "".join(tags) or DIVIDER
 
 
-def _line(icon_html: str, text: str) -> str:
-    return f"{icon_html} {text}" if icon_html else text
+def _line(icon_html: str, text: str, spaced: bool = True) -> str:
+    if not icon_html:
+        return text
+    return f"{icon_html}{' ' if spaced else ''}{text}"
+
+
+def _source_pick(members: List[Dict[str, Any]]) -> str:
+    """平博原单方向、盘口线与水位；多单水位不同时用 ≈。"""
+    items = [item for item in members if item.get("side")]
+    if not items:
+        return ""
+    first = items[0]
+    side = SIDES.get(str(first.get("side") or ""), str(first.get("side") or ""))
+    line = _signed_line(first.get("line")) if first.get("line") is not None else ""
+    odds_values = sorted(
+        {str(item.get("odds")).strip() for item in items if item.get("odds") not in (None, "")}
+    )
+    odds = ""
+    if odds_values:
+        odds = f"@{odds_values[0]}" if len(odds_values) == 1 else f"@≈{odds_values[0]}"
+    text = f"{side} {line}".strip()
+    if odds:
+        text = f"{text} {odds}".strip()
+    if len(items) > 1 and any(
+        (item.get("side"), str(item.get("line"))) != (first.get("side"), str(first.get("line")))
+        for item in items[1:]
+    ):
+        text += f" 等{len(items)}单"
+    return text
 
 
 def new_order_text(
@@ -237,50 +287,78 @@ def new_order_text(
     members: List[Dict[str, Any]],
     theme: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """新注单提醒，版式与旧系统推送保持一致。"""
+    """旧版紧凑模板：比分、跟单水位、平博水位、系统合并单号。"""
     agent, order_id = _agent_and_order(members)
     success = row.get("accepted_stake")
+    score = str(row.get("score") or (row.get("intent") or {}).get("score") or "").strip()
+    if score:
+        score = re.sub(r"(\d+)\s*[-:：]\s*(\d+)", r"\1-\2", score)
+    teams = html.escape(_teams(row)) + (f"（{html.escape(score)}）" if score else "")
+    is_live = (row.get("intent") or {}).get("is_live", True)
 
-    title = f"{_icon(theme, 'title', '🎯')} 新注单提醒"
-    suffix = _icon(theme, "title_suffix", "🎯")
-    if suffix:
-        title = f"{title} {suffix}"
+    follow_odds = (
+        row.get("accepted_odds") or row.get("odds") or (row.get("quote") or {}).get("odds") or ""
+    )
+    selection = _selection(row)
+    if follow_odds not in (None, ""):
+        selection = f"{selection} @{follow_odds}"
 
-    success_icon = _icon(theme, "follow_success", "✅")
-    success_line = f"{success_icon} 跟单成功：{_amount(success) if success is not None else '0'}"
-    success_suffix = _icon(theme, "follow_success_suffix", "🎉") if theme else ""
-    if success_suffix:
-        success_line = f"{success_line} {success_suffix}"
+    source_pick = _source_pick(members)
+    batch_no = str(row.get("source_batch_no") or "").strip()
 
+    divider = _divider(theme, 10) if theme else ""
     lines = [
-        f"<b>{title}</b>",
-        _divider(theme),
-        _line(_icon(theme, "league", "🏆"), html.escape(str(row.get("league") or "未知联赛"))),
-        _line(_icon(theme, "match", "⚽"), html.escape(_teams(row))),
-        "",
-        _line(_icon(theme, "status", "📍"), "状态：滚球"),
+        f"<b>{_icon(theme, 'title', '🤣')}新注单提醒</b>",
+        *([divider] if divider else []),
         _line(
-            _icon(theme, "play", "🎯"),
-            f"玩法：{MARKETS.get(str(row.get('market_type')), str(row.get('market_type') or '—'))}",
+            _icon(theme, "league", "🤣"),
+            html.escape(str(row.get("league") or "未知联赛")),
+            spaced=False,
         ),
-        _line(
-            _icon(theme, "play", "⏱"),
-            f"时段：{PERIODS.get(str(row.get('period')), str(row.get('period') or '—'))}",
-        ),
-        _line(_icon(theme, "play", "🎲"), f"选择：{html.escape(_selection(row))}"),
-        "",
-        _line(_icon(theme, "stake", "💰"), f"原注金额：{_amount(row.get('source_stake'))}"),
-        _line(_icon(theme, "follow_stake", "💵"), f"跟单金额：{_amount(row.get('target_stake'))}"),
-        success_line,
-        "",
-        _line(_icon(theme, "source", "🏦"), f"来源后台：{html.escape(agent)}"),
-        _line(_icon(theme, "order_id", "🧠"), f"单号：{html.escape(order_id)}"),
-        _line(
-            _icon(theme, "time", "🗓"),
-            f"时间：{_display_time(row.get('source_created_at') or row.get('created_at'))}",
-        ),
+        _line(_icon(theme, "match", "🤣"), teams, spaced=False),
+        _line(_icon(theme, "status", "📍"), f"状态：{'滚球' if is_live else '赛前'}", spaced=True),
+        f"玩法：{MARKETS.get(str(row.get('market_type')), str(row.get('market_type') or '—'))}",
+        f"时段：{PERIODS.get(str(row.get('period')), str(row.get('period') or '—'))}",
+        f"选择：{html.escape(selection)}",
     ]
+    if source_pick:
+        lines.append(f"平博：{html.escape(source_pick)}")
+    lines.extend(
+        [
+            _line(
+                _icon(theme, "stake", "💰"),
+                f"原注金额：{_amount(row.get('source_stake'))}",
+                spaced=True,
+            ),
+            _line(
+                _icon(theme, "follow_stake", "💲"),
+                f"跟单金额：{_amount(row.get('target_stake'))}",
+                spaced=True,
+            ),
+            _line(
+                _icon(theme, "follow_success", "🐦‍⬛"),
+                f"跟单成功：{_amount(success) if success is not None else '0'}",
+                spaced=False,
+            ),
+            _line(_icon(theme, "source", ""), f"来源后台：{html.escape(agent)}", spaced=False),
+            _line(
+                _icon(theme, "order_id", "🧠"),
+                f"单号：{html.escape(batch_no or order_id)}",
+                spaced=False,
+            ),
+            _line(
+                _icon(theme, "time", "🗓"),
+                f"时间：{_card_time(row.get('source_created_at') or row.get('created_at'))}",
+                spaced=False,
+            ),
+        ]
+    )
     return "\n".join(lines)
+
+
+def _card_time(value: Any) -> str:
+    parsed = _parse_time(value)
+    return parsed.strftime("%m-%d-%Y %H:%M:%S") if parsed else "—"
 
 
 def result_text(row: Dict[str, Any], theme: Optional[Dict[str, Any]] = None) -> str:
@@ -308,15 +386,20 @@ def result_text(row: Dict[str, Any], theme: Optional[Dict[str, Any]] = None) -> 
 
 def keyboard(group_id: str, theme: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     specs = [
-        ("res", "🎯 跟单结果"),
-        ("log", "🧾 跟单日志"),
-        ("pnl", "📉 输赢结果"),
-        ("amt", "📊 跟单报表"),
+        ("res", "跟单结果", "primary", "🎯"),
+        ("log", "跟单日志", "primary", "🧾"),
+        ("pnl", "输赢结果", "danger", "📉"),
+        ("amt", "跟单报表", "success", "📊"),
     ]
     buttons: List[Dict[str, str]] = []
-    for action, text in specs:
-        button = {"text": text, "callback_data": f"g:{group_id}:{action}"}
+    for action, text, style, native in specs:
         emoji_id = ((theme or {}).get("buttons") or {}).get(action)
+        button = {
+            # 有自定义表情图标时不再放原生 emoji，避免双图标。
+            "text": text if emoji_id else f"{native} {text}",
+            "style": style,
+            "callback_data": f"g:{group_id}:{action}",
+        }
         if emoji_id:
             button["icon_custom_emoji_id"] = str(emoji_id)
         buttons.append(button)
@@ -444,11 +527,26 @@ class TelegramAPI:
             payload["reply_markup"] = markup
         return self.call("editMessageText", payload)
 
-    def answer_callback(self, callback_id: str, text: str = "") -> None:
+    def answer_callback(self, callback_id: str, text: str = "", show_alert: bool = False) -> bool:
+        payload = {
+            "callback_query_id": callback_id,
+            "text": str(text or "")[:200],
+            "show_alert": bool(show_alert),
+        }
         try:
-            self.call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:180]})
+            self.call("answerCallbackQuery", payload)
+            return True
         except NotifyError:
-            pass
+            if show_alert:
+                try:
+                    self.call(
+                        "answerCallbackQuery",
+                        {**payload, "text": str(text or "")[:120], "show_alert": False},
+                    )
+                    return True
+                except NotifyError:
+                    pass
+            return False
 
     def get_updates(self, offset: int) -> List[Dict[str, Any]]:
         result = self.call(
@@ -466,9 +564,14 @@ class NotifyService:
     """后台推送服务：跟随跟单库轮询，发送/更新消息并处理按钮回调。"""
 
     def __init__(self, config: Dict[str, Any]):
+        self.config = dict(config)
         self.follow_db = Path(config["follow_db_path"])
         self.orders_db = Path(config["db_path"])
         self.store = NotifyStore(self.follow_db.with_name("notify.json"))
+        self._crown_adapter = None
+        self._report_store = None
+        self._account_cache: Dict[str, str] = {}
+        self._settlement_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
         self.follow = FollowStore(self.follow_db)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -688,11 +791,7 @@ class NotifyService:
             api.edit_message(
                 target_chat,
                 message_id,
-                new_order_text(row, members or [], theme)
-                + "\n\n"
-                + _divider(theme)
-                + "\n"
-                + result_text(row, theme),
+                new_order_text(row, members or [], theme),
                 keyboard(group_id, theme),
             )
         except NotifyError as exc:
@@ -702,11 +801,7 @@ class NotifyService:
                 api.edit_message(
                     target_chat,
                     message_id,
-                    new_order_text(row, members or [], None)
-                    + "\n\n"
-                    + DIVIDER
-                    + "\n"
-                    + result_text(row, None),
+                    new_order_text(row, members or [], None),
                     keyboard(group_id, None),
                 )
             elif "message is not modified" in text:
@@ -730,6 +825,14 @@ class NotifyService:
         with self._lock:
             self._state["custom_emoji_error"] = str(error)[:160]
 
+    def _debug(self, message: str) -> None:
+        try:
+            path = self.follow_db.with_name("notify_debug.log")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{_now_iso()} {message}\n")
+        except OSError:
+            pass
+
     def _touch_sent(self) -> None:
         with self._lock:
             self._state["last_sent_at"] = _now_iso()
@@ -745,11 +848,13 @@ class NotifyService:
             self._offset = int(update.get("update_id") or 0) + 1
             query = update.get("callback_query") or {}
             data = str(query.get("data") or "")
-            chat = ((query.get("message") or {}).get("chat") or {}).get("id")
-            api.answer_callback(str(query.get("id") or ""), "已收到")
-            text = self.callback_text(data)
-            if text and chat:
-                api.send_message(str(chat), text)
+            try:
+                text = self.alert_text(data)
+            except Exception as exc:  # noqa: BLE001 - 诊断用
+                self._debug(f"alert_text failed data={data} err={type(exc).__name__}:{exc}")
+                text = "查询失败，请稍后重试。"
+            ok = api.answer_callback(str(query.get("id") or ""), text, show_alert=True)
+            self._debug(f"callback data={data} len={len(text)} answered={ok}")
 
     def callback_text(self, data: str) -> str:
         match = re.match(r"^g:([0-9a-f]{32}):(res|log|pnl|amt)$", data)
@@ -767,6 +872,262 @@ class NotifyService:
         if action == "pnl":
             return self._pnl_text(detail)
         return self._report_text()
+
+    def alert_text(self, data: str) -> str:
+        """按钮弹窗用的纯文本短摘要（Telegram 上限 200 字）。"""
+        match = re.match(r"^g:([0-9a-f]{32}):(res|log|pnl|amt)$", data)
+        if not match:
+            return "按钮已过期，请重新发送指令。"
+        group_id, action = match.group(1), match.group(2)
+        detail = self._detail(group_id)
+        if not detail:
+            return "跟单记录不存在或已清理。"
+        row = detail.get("group") or {}
+        try:
+            if action == "res":
+                text = self._alert_result(row, detail)
+            elif action == "log":
+                text = self._alert_log(detail)
+            elif action == "pnl":
+                text = self._alert_pnl(detail)
+            else:
+                text = self._alert_report()
+        except Exception:  # noqa: BLE001 - 弹窗失败不能影响其它按钮
+            return "查询失败，请稍后重试。"
+        return _clip(text, 200)
+
+    def _account_tail(self, account_id: Any) -> str:
+        account = str(account_id or "").strip()
+        if not account:
+            return "----"
+        cached = self._account_cache.get(account)
+        if cached:
+            return cached
+        name = ""
+        try:
+            database = Path(self.config["pool_db_path"])
+            with closing(
+                sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
+            ) as connection:
+                row = connection.execute(
+                    "SELECT name FROM accounts WHERE id=?", (account,)
+                ).fetchone()
+                name = str(row[0] or "") if row else ""
+        except (KeyError, sqlite3.Error, OSError):
+            name = ""
+        tail = (name or account)[-4:]
+        self._account_cache[account] = tail
+        return tail
+
+    @staticmethod
+    def _tail4(value: Any) -> str:
+        text = str(value or "").strip()
+        return text[-4:] if text else "----"
+
+    def _alert_result(self, row: Dict[str, Any], detail: Dict[str, Any]) -> str:
+        home = str(row.get("crown_home") or row.get("home") or "—")
+        away = str(row.get("crown_away") or row.get("away") or "—")
+        market = MARKETS.get(str(row.get("market_type")), str(row.get("market_type") or "—"))
+        odds = row.get("accepted_odds") or row.get("odds") or (row.get("quote") or {}).get("odds")
+        account_tail = self._account_tail(row.get("account_id"))
+        tickets = [str(item) for item in (row.get("split_tickets") or []) if item]
+        for key in ("receipts", "receipt_id"):
+            value = row.get(key)
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                item = str(item or "").strip()
+                if item and item not in tickets:
+                    tickets.append(item)
+        if tickets:
+            lines = [
+                f"{account_tail}-{self._tail4(ticket)}"
+                + (f" &{odds}" if odds not in (None, "") else " &—")
+                for ticket in tickets[:3]
+            ]
+            if len(tickets) > 3:
+                lines.append(f"…等{len(tickets)}单")
+        else:
+            lines = [f"{account_tail}-未出票"]
+        return "\n".join(
+            [
+                "📋 跟单详细",
+                "",
+                f"🎯 比赛：{_plain(home)} VS {_plain(away)}",
+                f"⚽ 玩法：{market}",
+                f"📊 盘口：{_selection(row)}",
+                "",
+                "👥 跟单会员：",
+                *lines,
+            ]
+        )
+
+    @staticmethod
+    def _alert_log(detail: Dict[str, Any]) -> str:
+        history = detail.get("history") or []
+        lines = ["🧾 跟单日志"]
+        if not history:
+            lines.append("暂无记录")
+        for item in history[-3:]:
+            parsed = _parse_time(item.get("at"))
+            clock = parsed.strftime("%H:%M") if parsed else "—"
+            status = STATUS_LABELS.get(
+                str(item.get("to_status") or ""), str(item.get("to_status") or "")
+            )
+            message = _plain(item.get("message") or "").strip()
+            line = f"{clock} {status}"
+            if message:
+                line += f" {message[:24]}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _crown_settlement(self, account_id: Any, ticket: Any):
+        if self._stop.is_set():
+            return None
+        account = str(account_id or "").strip()
+        number = str(ticket or "").strip()
+        if not account or not number:
+            return None
+        key = (account, number)
+        now = time.monotonic()
+        cached = self._settlement_cache.get(key)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        data = None
+        try:
+            from .follow.crown import CrownAdapter
+
+            if self._crown_adapter is None:
+                self._crown_adapter = CrownAdapter(self.config, should_stop=self._stop.is_set)
+            data = self._crown_adapter.find_history_wager(account, number)
+        except Exception:  # noqa: BLE001 - 查不到就退回旧展示
+            data = None
+        if len(self._settlement_cache) > 100:
+            self._settlement_cache.clear()
+        self._settlement_cache[key] = (now, data)
+        return data
+
+    def _alert_pnl(self, detail: Dict[str, Any]) -> str:
+        """只显示皇冠回执号的输赢；分单时汇总所有票号的盈利。"""
+        row = detail.get("group") or {}
+        tickets = []
+        for value in row.get("split_tickets") or []:
+            ticket = str(value or "").strip()
+            if ticket and ticket not in tickets:
+                tickets.append(ticket)
+        for value in row.get("receipts") or []:
+            ticket = str(value or "").strip()
+            if ticket and ticket not in tickets:
+                tickets.append(ticket)
+        receipt = str(row.get("receipt_id") or "").strip()
+        if receipt and receipt not in tickets:
+            tickets.append(receipt)
+
+        if not tickets:
+            return "📉 输赢结果\n本单没有皇冠回执号（未跟单成功），\n没有皇冠输赢可查。"
+
+        settlements = []
+        for ticket in tickets:
+            if self._stop.is_set():
+                break
+            item = self._crown_settlement(row.get("account_id"), ticket)
+            if item:
+                settlements.append(item)
+        if not settlements:
+            return "📉 输赢结果\n皇冠结算暂未查到（可能未结算或历史未同步）。"
+
+        base = settlements[0]
+        settled_count = 0
+        total = 0.0
+        for item in settlements:
+            raw = item.get("win_gold")
+            if raw in (None, ""):
+                continue
+            try:
+                total += float(raw)
+                settled_count += 1
+            except (TypeError, ValueError):
+                continue
+        if settled_count == 0:
+            head, profit = "⏳ 注单未结算", "—"
+        elif settled_count < len(tickets):
+            head = f"⏳ 部分结算（{settled_count}/{len(tickets)} 单）"
+            profit = f"{total:+,.2f}"
+        else:
+            head, profit = "✅ 注单结算成功", f"{total:+,.2f}"
+
+        league = _plain(base.get("league") or row.get("league") or "—")
+        home = _plain(base.get("team_h_show") or row.get("crown_home") or row.get("home") or "—")
+        away = _plain(base.get("team_c_show") or row.get("crown_away") or row.get("away") or "—")
+        side = str(row.get("target_side") or "")
+        team = (
+            row.get("crown_home") or row.get("home")
+            if side == "HOME"
+            else row.get("crown_away") or row.get("away")
+        )
+        if row.get("market_type") == "TOTAL":
+            play = _selection(row)
+        else:
+            line = _signed_line(row.get("target_line"))
+            play = f"{_plain(team)} {line}".strip() or _selection(row)
+        odds = base.get("ioratio") or row.get("accepted_odds") or "—"
+        lines = [
+            head,
+            f"🏆 {league}",
+            f"⚽ {home} vs {away}",
+            f"🎯 玩法：{play}",
+            f"📊 水位：{odds}",
+            f"💰 盈利：{profit}",
+        ]
+        score = base.get("result_data") or base.get("score")
+        if score:
+            lines.append(f"📋 赛果：{_plain(score)}")
+        return "\n".join(lines)
+
+    def _alert_report(self) -> str:
+        """全部会员合并的输赢报表，只读本地报表库，不请求皇冠。"""
+        try:
+            from .crown_reports import CrownReportStore, report_db_path
+
+            if self._report_store is None:
+                self._report_store = CrownReportStore(report_db_path(self.config))
+            store = self._report_store
+            today = store.crown_today()
+            today_date = datetime.strptime(today, "%Y-%m-%d").date()
+            week_start = today_date - timedelta(days=today_date.weekday())
+            week_end = week_start + timedelta(days=6)
+            today_stats = store.totals(today, today)
+            week_stats = store.totals(
+                week_start.strftime("%Y-%m-%d"), week_end.strftime("%Y-%m-%d")
+            )
+
+            def block(label: str, date_text: str, stats: Dict[str, Any]) -> str:
+                total = stats["wins"] + stats["losses"] + stats["pushes"]
+                rate = f"{stats['wins'] / total * 100:.1f}%" if total else "--"
+                head = f"📅 {label}" + (f" ({date_text})" if date_text else "")
+                return "\n".join(
+                    [
+                        head,
+                        f"💰 盈亏：{stats['pnl']:.1f}",
+                        f"🎯 胜率：{rate}",
+                        f"📊 战绩：{stats['wins']}胜/{stats['losses']}负/{stats['pushes']}走",
+                        f"🎲 场次：{stats['total']} | 已结 {stats['settled']} | 未结 {stats['pending']}",
+                    ]
+                )
+
+            return (
+                "📈 输赢报表\n"
+                "──────────\n"
+                + block("今日", today, today_stats)
+                + "\n──────────\n"
+                + block("本周累计", "", week_stats)
+            )
+        except Exception:  # noqa: BLE001 - 报表库不可用时退回跟单快照
+            summary = self.follow.snapshot("ALL", limit=1).get("summary") or {}
+            succeeded = int(summary.get("succeeded") or 0)
+            failed = int(summary.get("failed") or 0)
+            stake = summary.get("confirmed_stake")
+            money = _amount(stake) if stake not in (None, "", "0") else "0"
+            return f"📈 输赢报表\n累计：成功 {succeeded} / 未完成 {failed}\n成交 {money}"
 
     def _detail(self, group_id: str) -> Optional[Dict[str, Any]]:
         try:

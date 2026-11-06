@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
@@ -41,14 +42,36 @@ DEFAULTS: Dict[str, Any] = {
     # Account pool: PS38 backend, Crown backend and Crown member sessions.
     "pool_db_path": "data/accounts.sqlite3",
     "pool_dir": "data/accounts",
-    "pool_check_interval_seconds": 60,
+    "pool_check_interval_seconds": 30,
     "pool_login_timeout_seconds": 300,
     "pool_check_timeout_seconds": 10,
     "pool_crown_ignore_https_errors": True,
+    "pool_auto_relogin": True,
+    "pool_relogin_cooldown_seconds": 60,
+    "pool_double_login_wait_seconds": 8,
+    # AdsPower 本地 API：号池页「ADS 账号导入」从这里读取环境列表。
+    "adspower_base_url": "http://localhost:50325",
+    "adspower_api_key": "",
+    "adspower_timeout_seconds": 20,
+    # PS38 自动登录：图形验证码识别命令（{image} 会替换为图片路径）。
+    "ps38_captcha_command": "",
+    "ps38_captcha_timeout": 30,
+    "ps38_captcha_dir": "data/captcha",
+    # browser: 绑定 AdsPower 环境时用无头 CDP；http: 纯 HTTP；auto: 有环境走 HTTP。
+    "ps38_transport": "browser",
+    "ps38_http_timeout": 30,
+    "ps38_http_user_agent": "",
+    # AdsPower 环境默认无头启动（真实指纹但不弹窗口）。
+    "adspower_headless": True,
     # 是否同时跟赛前（早盘）订单；关闭后只跟滚球。
     "follow_allow_prematch": True,
+    # 跟单并发：线程池大小（每个会员同一时刻只允许 1 单在途）。
+    "follow_parallel_attempts": 5,
     # Optional Crown feed used by the 赛事合并 page. The rest of the dashboard
     # keeps working when it is not running.
+    "crown_http_user_agent": "",
+    # browser: 绑定 AdsPower 环境时用无头 CDP（真实指纹）；http: 纯 HTTP。
+    "crown_transport": "browser",
     "crown_host": "127.0.0.1",
     "crown_port": 9223,
     "crown_utc_offset_minutes": -240,
@@ -72,6 +95,7 @@ ENV_OVERRIDES = {
     "port": "PS38_PORT",
     "db_path": "PS38_DB_PATH",
     "follow_db_path": "PS38_FOLLOW_DB",
+    "follow_parallel_attempts": "PS38_FOLLOW_PARALLEL",
     "copy_orders_db_path": "PS38_COPY_ORDERS_DB",
     "monitor_db_path": "PS38_MONITOR_DB",
     "profile_dir": "PS38_PROFILE_DIR",
@@ -88,7 +112,20 @@ ENV_OVERRIDES = {
     "pool_dir": "PS38_POOL_DIR",
     "pool_check_interval_seconds": "PS38_POOL_CHECK_INTERVAL",
     "pool_login_timeout_seconds": "PS38_POOL_LOGIN_TIMEOUT",
+    "pool_auto_relogin": "PS38_POOL_AUTO_RELOGIN",
+    "pool_relogin_cooldown_seconds": "PS38_POOL_RELOGIN_COOLDOWN",
+    "pool_double_login_wait_seconds": "PS38_POOL_DOUBLE_WAIT",
+    "adspower_base_url": "ADSPOWER_BASE_URL",
+    "adspower_api_key": "ADSPOWER_KEY",
+    "adspower_timeout_seconds": "ADSPOWER_TIMEOUT",
+    "ps38_captcha_command": "PS38_CAPTCHA_COMMAND",
+    "ps38_captcha_timeout": "PS38_CAPTCHA_TIMEOUT",
+    "ps38_transport": "PS38_TRANSPORT",
+    "ps38_http_timeout": "PS38_HTTP_TIMEOUT",
+    "adspower_headless": "ADSPOWER_HEADLESS",
     "headless": "PS38_HEADLESS",
+    "crown_http_user_agent": "CROWN_HTTP_USER_AGENT",
+    "crown_transport": "CROWN_TRANSPORT",
     "crown_host": "PS38_CROWN_HOST",
     "crown_port": "PS38_CROWN_PORT",
     "crown_utc_offset_minutes": "PS38_CROWN_OFFSET",
@@ -204,6 +241,11 @@ def load_config() -> Dict[str, Any]:
     config["browser_channel"] = channel
 
     config["db_path"] = resolve_path(config.get("db_path"), DEFAULTS["db_path"])
+    try:
+        parallel = int(config.get("follow_parallel_attempts") or 5)
+    except (TypeError, ValueError):
+        parallel = 5
+    config["follow_parallel_attempts"] = max(1, min(20, parallel))
     config["follow_db_path"] = resolve_path(
         config.get("follow_db_path"), DEFAULTS["follow_db_path"]
     )
@@ -265,6 +307,65 @@ def load_config() -> Dict[str, Any]:
     )
     config["pool_login_timeout_seconds"] = max(60, min(1800, config["pool_login_timeout_seconds"]))
     config["pool_check_timeout_seconds"] = max(3, min(60, config["pool_check_timeout_seconds"]))
+    config["pool_auto_relogin"] = _as_bool(config.get("pool_auto_relogin", True))
+    try:
+        config["pool_relogin_cooldown_seconds"] = int(
+            config.get("pool_relogin_cooldown_seconds") or DEFAULTS["pool_relogin_cooldown_seconds"]
+        )
+        config["pool_double_login_wait_seconds"] = int(
+            config.get("pool_double_login_wait_seconds")
+            or DEFAULTS["pool_double_login_wait_seconds"]
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("pool 自动重登间隔必须是整数秒") from exc
+    config["pool_relogin_cooldown_seconds"] = max(
+        15, min(3600, config["pool_relogin_cooldown_seconds"])
+    )
+    config["pool_double_login_wait_seconds"] = max(
+        2, min(600, config["pool_double_login_wait_seconds"])
+    )
+
+    base = (
+        str(config.get("adspower_base_url") or "").strip().rstrip("/")
+        or DEFAULTS["adspower_base_url"]
+    )
+    try:
+        parsed_base = urlsplit(base)
+    except ValueError as exc:
+        raise RuntimeError("adspower_base_url 必须是完整的 http(s) 地址") from exc
+    if parsed_base.scheme not in {"http", "https"} or not parsed_base.hostname:
+        raise RuntimeError("adspower_base_url 必须是完整的 http(s) 地址")
+    config["adspower_base_url"] = base
+    config["adspower_api_key"] = str(config.get("adspower_api_key") or "").strip()
+    try:
+        config["adspower_timeout_seconds"] = int(config.get("adspower_timeout_seconds") or 20)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("adspower_timeout_seconds 必须是整数秒") from exc
+    config["adspower_timeout_seconds"] = max(5, min(120, config["adspower_timeout_seconds"]))
+    config["ps38_captcha_command"] = str(config.get("ps38_captcha_command") or "").strip()
+    try:
+        config["ps38_captcha_timeout"] = int(config.get("ps38_captcha_timeout") or 30)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("ps38_captcha_timeout 必须是整数秒") from exc
+    config["ps38_captcha_timeout"] = max(5, min(120, config["ps38_captcha_timeout"]))
+    config["ps38_captcha_dir"] = resolve_path(
+        config.get("ps38_captcha_dir"), DEFAULTS["ps38_captcha_dir"]
+    )
+    transport = str(config.get("ps38_transport") or "auto").strip().lower()
+    if transport not in {"auto", "http", "browser"}:
+        raise RuntimeError("ps38_transport 可为 auto/http/browser")
+    config["ps38_transport"] = transport
+    try:
+        config["ps38_http_timeout"] = int(config.get("ps38_http_timeout") or 30)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("ps38_http_timeout 必须是整数秒") from exc
+    config["ps38_http_timeout"] = max(5, min(120, config["ps38_http_timeout"]))
+    config["ps38_http_user_agent"] = str(config.get("ps38_http_user_agent") or "").strip()
+    config["adspower_headless"] = _as_bool(config.get("adspower_headless", True))
+    crown_transport = str(config.get("crown_transport") or "browser").strip().lower()
+    if crown_transport not in {"browser", "http"}:
+        raise RuntimeError("crown_transport 可为 browser/http")
+    config["crown_transport"] = crown_transport
     return config
 
 
@@ -275,6 +376,7 @@ def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "port": config["port"],
         "db_path": str(config["db_path"]),
         "follow_db_path": str(config.get("follow_db_path", "")),
+        "follow_parallel_attempts": config.get("follow_parallel_attempts", 5),
         "base_url": config["base_url"],
         "agent_codes": list(config["agent_codes"]),
         "history_from": config["history_from"],
@@ -285,8 +387,14 @@ def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "headless": config["headless"],
         "pool_db_path": str(config.get("pool_db_path", "")),
         "pool_dir": str(config.get("pool_dir", "")),
-        "pool_check_interval_seconds": config.get("pool_check_interval_seconds", 60),
+        "pool_check_interval_seconds": config.get("pool_check_interval_seconds", 30),
         "pool_login_timeout_seconds": config.get("pool_login_timeout_seconds", 300),
+        "adspower_base_url": config.get("adspower_base_url", ""),
+        "has_adspower_key": bool(config.get("adspower_api_key")),
+        "has_captcha_command": bool(config.get("ps38_captcha_command")),
+        "ps38_transport": config.get("ps38_transport", "browser"),
+        "crown_transport": config.get("crown_transport", "browser"),
+        "adspower_headless": bool(config.get("adspower_headless", True)),
         "crown_host": config.get("crown_host", ""),
         "crown_port": config.get("crown_port", 9223),
         "crown_utc_offset_minutes": config.get("crown_utc_offset_minutes", -240),

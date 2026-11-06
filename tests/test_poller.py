@@ -44,6 +44,13 @@ class ShowWindowTests(unittest.TestCase):
         with self.assertRaises(ReloginRequested):
             poller._service_show_window()
 
+    def test_relogin_interrupts_waiting_login(self):
+        poller = make_poller()
+        poller.session = Mock()
+        poller.request_relogin()
+        with self.assertRaises(ReloginRequested):
+            poller._service_show_window()
+
 
 class LifecycleTests(unittest.TestCase):
     def test_normal_shutdown_closes_browser_and_database(self):
@@ -96,6 +103,13 @@ class LifecycleTests(unittest.TestCase):
 
 
 class SessionRecoveryTests(unittest.TestCase):
+    def test_cleared_totp_secret_does_not_keep_stale_value(self):
+        poller = make_poller()
+        poller.session = Mock(totp_secret="old-secret")
+        with patch.object(poller, "_primary_credentials", return_value={"totp_secret": ""}):
+            poller.refresh_credentials()
+        self.assertEqual(poller.session.totp_secret, "")
+
     def test_expired_session_recovers_in_existing_window_and_resumes_polling(self):
         poller = make_poller()
         session = Mock()

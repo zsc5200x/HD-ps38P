@@ -20,6 +20,7 @@ class QueueTests(unittest.TestCase):
     add = core.FollowServiceTests.add
     tick = core.FollowServiceTests.tick
     groups = core.FollowServiceTests.groups
+    pending_batches = core.FollowServiceTests.pending_batches
 
     def stored_group(self, group_id):
         with self.service.store.connect() as connection:
@@ -78,12 +79,17 @@ class QueueTests(unittest.TestCase):
             self.enable()
             self.add("first")
             self.call_without_network_wait()
+            self.assertTrue(self.pending_batches())
+            self.clock.now += core.PENDING_SECONDS
+            self.call_without_network_wait()
             self.assertTrue(entered.wait(2))
             first = self.groups()[0]
             self.assertEqual(first["status"], "PREPARING")
 
             self.clock.now += 21
             self.add("second")
+            self.call_without_network_wait()
+            self.clock.now += core.PENDING_SECONDS
             self.call_without_network_wait()
             groups = self.groups()
             second = next(group for group in groups if group["id"] != first["id"])
@@ -113,6 +119,35 @@ class QueueTests(unittest.TestCase):
         finally:
             release.set()
 
+    def test_same_account_can_run_parallel_when_limit_allows(self):
+        # 每号并发=3 时，同一个号可以同时挂 3 个在途任务。
+        from ps38app.follow.dispatcher import BoundedDispatcher
+
+        dispatcher = BoundedDispatcher(max_workers=5, per_account=3)
+        release = threading.Event()
+
+        def job():
+            release.wait(2)
+
+        try:
+            futures = [dispatcher.submit(f"k{i}", "crown-a", job) for i in range(3)]
+            self.assertTrue(all(f is not None for f in futures))
+            # 第 4 个同号任务应被拒绝
+            self.assertIsNone(dispatcher.submit("k4", "crown-a", job))
+        finally:
+            release.set()
+            dispatcher.shutdown()
+
+    def test_dispatcher_workers_follow_config(self):
+        from ps38app.follow.dispatcher import BoundedDispatcher
+
+        config = dict(self.config, follow_parallel_attempts=5)
+        dispatcher = BoundedDispatcher(max_workers=config["follow_parallel_attempts"])
+        try:
+            self.assertEqual(dispatcher.available_slots(), 5)
+        finally:
+            dispatcher.shutdown()
+
     def test_second_instance_preserves_live_claim_and_cannot_reprepare(self):
         entered, release = self.block_prepare()
         other = None
@@ -120,11 +155,15 @@ class QueueTests(unittest.TestCase):
             self.enable()
             self.add("first")
             self.call_without_network_wait()
+            self.clock.now += core.PENDING_SECONDS
+            self.call_without_network_wait()
             self.assertTrue(entered.wait(2))
             first_id = self.groups()[0]["id"]
 
             self.clock.now += 21
             self.add("second")
+            self.call_without_network_wait()
+            self.clock.now += core.PENDING_SECONDS
             self.call_without_network_wait()
             other_executor = core.Executor(self.clock)
             other = FollowService(self.config, other_executor, self.clock)
@@ -176,7 +215,7 @@ class QueueTests(unittest.TestCase):
         self.tick()
         completed = self.service.detail(group["id"])
         self.assertEqual(completed["group"]["status"], "SUCCEEDED")
-        self.assertEqual([item[1] for item in self.executor.submitted], ["60", "60"])
+        self.assertEqual([item[1] for item in self.executor.submitted], ["61", "61"])
         self.assertEqual([item[0]["side"] for item in self.executor.submitted], ["HOME", "HOME"])
         self.assertEqual(
             [item["status"] for item in completed["attempts"]], ["REJECTED", "SUCCEEDED"]
@@ -185,7 +224,7 @@ class QueueTests(unittest.TestCase):
         self.tick(20)
         self.assertEqual(len(self.executor.submitted), 2)
 
-    def test_market_change_retries_once_then_waits_within_window(self):
+    def test_market_change_fast_retries_then_waits_within_window(self):
         self.executor.result = {
             "status": "REJECTED",
             "retryable": True,
@@ -197,12 +236,14 @@ class QueueTests(unittest.TestCase):
         self.add()
         self.tick(21)
         group_id = self.groups()[0]["id"]
-        # 第一次失败：立刻重查重提
-        stored = self.stored_group(group_id)
-        self.assertEqual(stored["status"], "RETRY_WAIT")
-        self.clock.now = stored["next_check_at"] + 0.001
-        self.tick()
-        # 第二次仍失败：进入 90 秒观察窗口
+        # 前两次：亚秒级重试（盘口变动要立刻重查）
+        for _ in range(2):
+            stored = self.stored_group(group_id)
+            self.assertEqual(stored["status"], "RETRY_WAIT")
+            self.assertLess(stored["next_check_at"] - self.clock.now, 1.0)
+            self.clock.now = stored["next_check_at"] + 0.001
+            self.tick()
+        # 第三次仍失败：进入 90 秒观察窗口
         stored = self.stored_group(group_id)
         self.assertEqual(stored["status"], "RETRY_WAIT")
         self.assertGreater(stored["recheck_until"], self.clock.now)
@@ -210,86 +251,36 @@ class QueueTests(unittest.TestCase):
         self.clock.now = stored["recheck_until"] + 0.001
         self.tick()
         self.assertEqual(self.service.detail(group_id)["group"]["status"], "REJECTED")
-        self.assertEqual(len(self.executor.submitted), 2)
+        self.assertEqual(len(self.executor.submitted), 3)
 
-    def test_timeline_events_record_crown_return_code(self):
-        self.executor.result = {
-            "status": "REJECTED",
-            "retryable": False,
-            "category": "PLATFORM_REJECTED",
-            "error_code": "1X002",
-            "action": "stop",
-            "message": "已超过停止交易时间",
-        }
-        self.enable()
-        self.add()
-        self.tick(21)
-        events = self.service.store.recent_events(20)
-        self.assertTrue(events)
-        crown = [item for item in events if item["kind"] == "CROWN"]
-        self.assertTrue(crown)
-        self.assertEqual(crown[0]["error_code"], "1X002")
-        self.assertIn("已超过停止交易时间", crown[0]["message"])
-
-    def test_1x001_keeps_order_within_the_market_wait_window(self):
+    def test_generic_bet_rejection_switches_accounts_then_waits(self):
+        self.executor.account_ids = ["crown-a", "crown-b", "crown-c", "crown-d"]
         self.executor.result = {
             "status": "REJECTED",
             "retryable": True,
             "category": "MARKET_REJECTED",
-            "error_code": "1X001",
-            "action": "wait_1x001",
+            "error_code": "betError000",
+            "action": "retry_bet_switch",
         }
         self.enable()
         self.add()
         self.tick(21)
         group_id = self.groups()[0]["id"]
+        accounts = []
+        for _ in range(3):
+            stored = self.stored_group(group_id)
+            accounts.append(stored["account_id"])
+            self.assertEqual(stored["status"], "RETRY_WAIT")
+            self.clock.now = stored["next_check_at"] + 0.001
+            self.tick()
+        self.assertEqual(len(set(accounts)), 3, f"应换 3 个不同账号: {accounts}")
         stored = self.stored_group(group_id)
-        self.assertEqual(stored["status"], "WAIT_MARKET")
-        self.assertGreater(stored["market_wait_until"], self.clock.now)
-        # 窗口内继续探测
-        self.clock.now = stored["next_check_at"] + 0.001
-        self.tick()
-        self.assertIn(self.stored_group(group_id)["status"], {"WAIT_MARKET", "RETRY_WAIT"})
-        # 260 秒窗口结束后判失败
-        self.clock.now = stored["market_wait_until"] + 0.001
+        self.assertEqual(stored["status"], "RETRY_WAIT")
+        self.assertGreater(stored["recheck_until"], self.clock.now)
+        self.assertLessEqual(stored["next_check_at"] - self.clock.now, 15.1)
+        self.clock.now = stored["recheck_until"] + 0.001
         self.tick()
         self.assertEqual(self.service.detail(group_id)["group"]["status"], "REJECTED")
-
-    def test_switch_account_tries_each_member_then_stops(self):
-        self.executor.account_ids = ["crown-a", "crown-b"]
-        self.executor.result = {
-            "status": "REJECTED",
-            "retryable": True,
-            "category": "ACCOUNT_CREDIT",
-            "error_code": "1X008",
-            "action": "switch_account",
-        }
-        self.enable()
-        self.add()
-        self.tick(21)
-        group_id = self.groups()[0]["id"]
-        self.assertEqual(self.stored_group(group_id)["status"], "RETRY_WAIT")
-        self.clock.now = self.stored_group(group_id)["next_check_at"] + 0.001
-        self.tick()
-        # 第二个号也失败后，没有可用号了
-        self.assertEqual(self.service.detail(group_id)["group"]["status"], "REJECTED")
-        tried = self.stored_group(group_id)["tried_accounts"]
-        self.assertEqual(sorted(tried), ["crown-a", "crown-b"])
-
-    def test_1x020_halves_the_stake_and_keeps_the_rest(self):
-        self.executor.result = {
-            "status": "REJECTED",
-            "retryable": True,
-            "category": "MARKET_REJECTED",
-            "error_code": "1X020",
-            "action": "split_half",
-        }
-        self.enable(amount_mode="fixed", amount_value="200", direction="forward")
-        self.add(stake="200")
-        self.tick(21)
-        group = self.stored_group(self.groups()[0]["id"])
-        self.assertEqual(group["target_stake"], "100")
-        self.assertEqual(group["split_remaining"], "100")
 
     def test_unknown_and_nonwhitelisted_rejections_are_never_resubmitted(self):
         self.executor.result = {

@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import store as order_store
+from .adspower import AdsPowerError
 from .config import PROJECT_DIR, public_config
 from .copy_orders import assign_numbers as assign_copy_numbers
 from .fixture_merge import CrownUnavailable, MappingConflict, MergeService
@@ -169,6 +170,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._my_events_events(query)
             elif parsed.path == "/api/notify":
                 self._notify_status()
+            elif parsed.path == "/api/crown-reports":
+                self._crown_report(query)
             elif parsed.path == "/api/merge":
                 self._merge()
             elif parsed.path == "/api/follow":
@@ -179,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._monitor_status()
             elif parsed.path == "/api/pool":
                 self._pool_status()
+            elif parsed.path == "/api/adspower/profiles":
+                self._adspower_profiles(query)
             elif parsed.path == "/api/status":
                 self._status()
             elif parsed.path == "/api/health":
@@ -293,6 +298,35 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "打开路径失败"}, status=500)
 
     # ── follow groups and confirmed receipts ──────────────────────────────
+
+    def _crown_report(self, query):
+        service = getattr(self.server, "report_service", None)
+        if service is None:
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": getattr(self.server, "report_error", "") or "报表服务不可用",
+                },
+                status=503,
+            )
+            return
+        account = str((query.get("account") or [""])[0]).strip()
+        date_from = str((query.get("from") or [""])[0]).strip()
+        date_to = str((query.get("to") or [""])[0]).strip()
+        try:
+            limit = int((query.get("limit") or ["500"])[0])
+        except (TypeError, ValueError):
+            limit = 500
+        self.send_json(
+            {
+                "ok": True,
+                "rows": service.store.rows(
+                    account_id=account, date_from=date_from, date_to=date_to, limit=limit
+                ),
+                "summary": service.store.summary(account or None),
+                "sync": service.status(),
+            }
+        )
 
     def _notify_service(self):
         return getattr(self.server, "notify_service", None)
@@ -519,6 +553,23 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self.send_json({"ok": False, "error": f"账号池读取失败：{exc}"}, status=500)
 
+    def _adspower_profiles(self, query) -> None:
+        pool = self._pool()
+        if pool is None:
+            return
+        refresh = str((query.get("refresh") or ["0"])[0]).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        try:
+            self.send_json(pool.environments(refresh=refresh))
+        except AdsPowerError as exc:
+            self.send_json({"ok": False, "error": f"AdsPower 不可用：{exc}"}, status=503)
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": f"读取 AdsPower 环境失败：{exc}"}, status=500)
+
     def _pool_action(self, path: str) -> None:
         pool = self._pool()
         if pool is None:
@@ -543,6 +594,28 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/pool/check-all":
                 result = pool.check_all()
                 self.send_json({"ok": True, **result})
+            elif path == "/api/pool/import-envs":
+                result = pool.import_environments(body)
+                self.send_json({"ok": True, **result})
+            elif path == "/api/pool/bind-env":
+                account_id = str(body.get("id") or "")
+                env_id = str(body.get("env_id") or "")
+                if not account_id:
+                    raise ValueError("缺少账号 ID")
+                account = pool.bind_environment(account_id, env_id)
+                self.send_json(
+                    {
+                        "ok": True,
+                        "account": account,
+                        "message": f"已绑定环境 {account.get('env_no') or env_id}",
+                    }
+                )
+            elif path == "/api/pool/credentials":
+                account_id = str(body.get("id") or "")
+                if not account_id:
+                    raise ValueError("缺少账号 ID")
+                account = pool.save_credentials(account_id, body)
+                self.send_json({"ok": True, "account": account, "message": "账号凭据已保存"})
             elif path == "/api/pool/clear":
                 account_id = str(body.get("id") or "")
                 account = pool.clear_session(account_id)
@@ -571,6 +644,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc)}, status=404)
         except ValueError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except AdsPowerError as exc:
+            self.send_json({"ok": False, "error": f"AdsPower 不可用：{exc}"}, status=503)
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             if message.startswith(
@@ -1132,6 +1207,7 @@ class Handler(BaseHTTPRequestHandler):
                     "since": state["since"],
                     "last_error": state["last_error"],
                     "profile": state["profile"],
+                    "backend": state.get("backend", "local"),
                     "agents": state["agents"],
                     "last_open_at": state["last_open_at"],
                     "last_settled_at": state["last_settled_at"],
@@ -1167,6 +1243,8 @@ class DashboardServer(ThreadingHTTPServer):
         self.monitor_error = ""
         self.notify_service = None
         self.notify_error = ""
+        self.report_service = None
+        self.report_error = ""
         # 端口占用时先退出，避免第二次启动触发在途跟单恢复。
         super().__init__(address, Handler)
         try:
@@ -1194,8 +1272,17 @@ class DashboardServer(ThreadingHTTPServer):
         except Exception as exc:  # noqa: BLE001 - 推送不可用不能影响主面板
             self.notify_service = None
             self.notify_error = f"推送服务初始化失败：{exc}"
+        try:
+            from .crown_reports import ReportSyncService
+
+            self.report_service = ReportSyncService(config)
+        except Exception as exc:  # noqa: BLE001 - 报表不可用不能影响主面板
+            self.report_service = None
+            self.report_error = f"报表服务初始化失败：{exc}"
 
     def server_close(self) -> None:
+        if self.report_service is not None:
+            self.report_service.stop()
         if self.notify_service is not None:
             self.notify_service.stop()
         if self.monitor_service is not None:
@@ -1219,6 +1306,8 @@ def serve(config: Dict[str, Any], poller) -> None:
         server.monitor_service.start()
     if server.notify_service is not None:
         server.notify_service.start()
+    if server.report_service is not None:
+        server.report_service.start()
     print(f"[server] PS38 赛事看板：http://{config['host']}:{config['port']}/", flush=True)
     print("[server] 仅本机访问；浏览器完成登录/2FA 后自动开始拉取订单", flush=True)
     try:

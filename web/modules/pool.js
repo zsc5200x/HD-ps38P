@@ -30,6 +30,9 @@ let refreshTimer = null;
 let loading = false;
 const view = { search: "", filter: "all", sort: "default" };
 const monitor = { data: null, fetchedAt: 0 };
+const ads = { items: [], summary: {}, selected: new Set(), usernames: {}, loading: false, error: "" };
+let credentialAccountId = "";
+let pendingDestructive = null;
 
 function formatTime(value) {
   const raw = String(value || "");
@@ -127,6 +130,30 @@ function lastBeat(account) {
   return beats.length ? beats[beats.length - 1] : null;
 }
 
+const COUNTRY_NAMES = {
+  VN: "越南", JP: "日本", US: "美国", HK: "香港", TW: "台湾", SG: "新加坡",
+  TH: "泰国", PH: "菲律宾", ID: "印尼", MY: "马来西亚", KR: "韩国", GB: "英国",
+  DE: "德国", FR: "法国", NL: "荷兰", RU: "俄罗斯", BR: "巴西", IN: "印度",
+  TR: "土耳其", AE: "阿联酋", CA: "加拿大", AU: "澳大利亚", CN: "中国",
+};
+
+function flagOf(code) {
+  const upper = String(code || "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(upper)) return "";
+  return String.fromCodePoint(...[...upper].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+function networkLabel(network) {
+  const net = network || {};
+  const country = String(net.country || "").toUpperCase();
+  const name = COUNTRY_NAMES[country] || country;
+  if (net.mode === "env_proxy") {
+    const host = net.host ? `${net.host}${net.port ? `:${net.port}` : ""}` : "环境代理";
+    return [flagOf(country) || "", name, host].filter(Boolean).join(" · ");
+  }
+  return "直连 · 本机出口";
+}
+
 function metric(label, value, className = "") {
   const item = el("div", "pool-metric");
   item.append(el("span", "", label));
@@ -178,6 +205,7 @@ function heartbeatBlock(account) {
 const ACTION_ICONS = {
   login: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H5v16h5"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>',
+  credentials: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="3"/><path d="M11 12h9"/><path d="M17 12v3"/><path d="M20 12v2"/></svg>',
   clear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M8 8l8 8"/></svg>',
   delete: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>',
 };
@@ -212,7 +240,10 @@ function cardFor(account) {
   identity.append(el("span", "pool-card-dot"));
   const names = el("div", "pool-card-names");
   names.append(el("h3", "", account.name || account.username || "未命名"));
-  names.append(el("p", "", [account.username, account.base_url].filter(Boolean).join(" · ")));
+  const envLabel = account.env_no
+    ? `ADS ${account.env_no}`
+    : (account.env_id ? "ADS 环境" : "");
+  names.append(el("p", "", [account.username, account.base_url, envLabel].filter(Boolean).join(" · ")));
   identity.append(names);
   head.append(identity);
   head.append(el("span", "pool-platform", account.platform_label || account.platform));
@@ -239,6 +270,18 @@ function cardFor(account) {
   }
   card.append(metrics);
 
+  if (account.platform === "crown_member") {
+    const net = networkLabel(account.network);
+    const row = el("p", "pool-card-network");
+    row.append(el("span", "pool-card-network-icon", "⇄"));
+    const isProxy = (account.network || {}).mode === "env_proxy";
+    const text = el("span", "", net);
+    text.className = isProxy ? "pool-card-network-text is-proxy" : "pool-card-network-text is-direct";
+    row.append(text);
+    row.title = isProxy ? "出口：AdsPower 环境绑定的代理" : "出口：本机网络（该环境未配置代理）";
+    card.append(row);
+  }
+
   card.append(heartbeatBlock(account));
 
   const message = account.status === "error" || account.status === "expired"
@@ -252,9 +295,16 @@ function cardFor(account) {
 
   const actions = el("footer", "pool-card-actions");
   const busy = ["logging_in", "checking"].includes(account.status);
+  const envPending = account.session_backend === "adspower"
+    && !["ps38_backend", "crown_member"].includes(account.platform);
   const primary = account.managed_by === "collector";
-  actions.append(actionButton("登录", "login", account, { disabled: busy }));
-  actions.append(actionButton("检测", "check", account, { disabled: busy }));
+  actions.append(actionButton("登录", "login", account, { disabled: busy || envPending }));
+  actions.append(actionButton("检测", "check", account, { disabled: busy || envPending }));
+  actions.append(actionButton("凭据", "credentials", account, { disabled: busy }));
+  if (primary || (account.session_backend === "adspower"
+      && ["ps38_backend", "crown_member"].includes(account.platform))) {
+    actions.append(actionButton("重登", "relogin", account, { disabled: busy }));
+  }
   if (!primary) {
     actions.append(actionButton("清除", "clear", account, { disabled: busy }));
     actions.append(actionButton("删除", "delete", account, { disabled: busy, tone: "danger" }));
@@ -535,11 +585,31 @@ async function runAction(action, accountId) {
     clear: "已清除保存的会话",
     delete: "账号已删除",
   };
-  if ((action === "clear" || action === "delete")
-      && !window.confirm(action === "delete" ? "删除账号会同时删除本地会话，继续？" : "清除账号保存的会话，继续？")) {
-    return;
+  if (action === "clear" || action === "delete") {
+    // Native window.confirm can be suppressed by the browser, which makes
+    // delete look broken with no request at all. Use an in-page double click.
+    const now = Date.now();
+    const pending = pendingDestructive;
+    const same = pending
+      && pending.action === action
+      && pending.id === accountId
+      && now - pending.at < 5000;
+    if (!same) {
+      pendingDestructive = { action, id: accountId, at: now };
+      showToast(action === "delete" ? "再点一次「删除」确认" : "再点一次「清除」确认");
+      return;
+    }
+    pendingDestructive = null;
   }
   try {
+    if (action === "relogin") {
+      const payload = accountId === "primary-ps38"
+        ? await postJson("/api/actions/login", {})
+        : await postJson("/api/pool/login", { id: accountId, force: true });
+      showToast(payload.message || "已发起重新登录");
+      refresh();
+      return;
+    }
     const payload = await postJson(`/api/pool/${action}`, { id: accountId });
     showToast(payload.message || labels[action] || "操作完成");
     refresh();
@@ -553,6 +623,10 @@ function onCardsClick(event) {
   if (!button) return;
   if (button.dataset.poolAction === "add") {
     openDialog();
+    return;
+  }
+  if (button.dataset.poolAction === "credentials") {
+    openCredentials(button.dataset.poolId);
     return;
   }
   runAction(button.dataset.poolAction, button.dataset.poolId);
@@ -613,6 +687,348 @@ function closeDialog() {
   else dialog.removeAttribute("open");
 }
 
+/* ── 账号凭据 ──────────────────────────────────────────────────────────── */
+
+function openCredentials(accountId) {
+  const account = (snapshot?.accounts || []).find((item) => item.id === accountId);
+  const dialog = $("poolCredDialog");
+  if (!account || !dialog) return;
+  credentialAccountId = accountId;
+  const username = account.credential_username
+    || (account.managed_by === "collector"
+      ? (account.login_id || "")
+      : (account.username && account.username !== "手动登录" ? account.username : ""));
+  const userInput = $("poolCredUsername");
+  if (userInput) userInput.value = username;
+  const password = $("poolCredPassword");
+  if (password) password.value = "";
+  const totp = $("poolCredTotp");
+  if (totp) totp.value = "";
+  const hint = $("poolCredHint");
+  if (hint) {
+    const parts = [
+      account.has_credentials ? "密码已保存" : "还没有保存密码",
+      account.has_totp ? "TOTP 已保存" : "TOTP 未设置",
+      account.env_no ? `ADS 环境 ${account.env_no}` : "",
+    ].filter(Boolean);
+    hint.textContent = `${parts.join(" · ")}。凭据只保存在本机 0600 文件，不通过接口返回；PS38 会话失效时会尝试自动登录，识别失败转人工。`;
+  }
+  const error = $("poolCredError");
+  if (error) error.textContent = "";
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeCredentials() {
+  const dialog = $("poolCredDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function submitCredentials(event) {
+  event.preventDefault();
+  const error = $("poolCredError");
+  if (error) error.textContent = "";
+  const payload = {
+    id: credentialAccountId,
+    username: $("poolCredUsername")?.value.trim() || "",
+    password: $("poolCredPassword")?.value || "",
+    totp_secret: $("poolCredTotp")?.value.trim() || "",
+  };
+  if (!payload.username) {
+    if (error) error.textContent = "请填写登录账号";
+    return;
+  }
+  try {
+    const result = await postJson("/api/pool/credentials", payload);
+    closeCredentials();
+    showToast(result.message || "账号凭据已保存");
+    refresh();
+  } catch (exc) {
+    if (error) error.textContent = String(exc?.message || exc);
+  }
+}
+
+/* ── ADS 账号导入 ──────────────────────────────────────────────────────── */
+
+function adsDialog() {
+  return $("poolAdsDialog");
+}
+
+function adsSiteDefault(platform) {
+  if (platform === "ps38_backend") return "https://www.ps38ag.com";
+  const accounts = snapshot?.accounts || [];
+  const member = accounts.find((item) => item.platform === "crown_member" && item.base_url);
+  return member?.base_url || "";
+}
+
+function applyAdsPlatformDefaults() {
+  const platform = $("poolAdsPlatform")?.value || "crown_member";
+  const site = $("poolAdsSite");
+  if (!site) return;
+  const known = new Set(
+    [...(snapshot?.accounts || []).map((item) => item.base_url), "https://www.ps38ag.com"]
+      .filter(Boolean),
+  );
+  if (!site.value.trim() || known.has(site.value.trim())) {
+    site.value = adsSiteDefault(platform);
+  }
+}
+
+function adsFiltered() {
+  const term = String($("poolAdsSearch")?.value || "").trim().toLowerCase();
+  if (!term) return ads.items;
+  return ads.items.filter((item) => (
+    [item.profile_no, item.name, item.account, item.group_name, item.profile_id]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(term)
+  ));
+}
+
+function adsImportable(item) {
+  return !item.bound_account;
+}
+
+function updateAdsSelection() {
+  const importable = adsFiltered().filter(adsImportable);
+  const filteredSelected = importable.filter((item) => ads.selected.has(item.profile_id)).length;
+  const selectedCount = ads.items.filter(
+    (item) => adsImportable(item) && ads.selected.has(item.profile_id),
+  ).length;
+  const selectAll = $("poolAdsSelectAll");
+  if (selectAll) {
+    selectAll.checked = importable.length > 0 && filteredSelected === importable.length;
+    selectAll.indeterminate = filteredSelected > 0 && filteredSelected < importable.length;
+    selectAll.disabled = ads.loading || importable.length === 0;
+  }
+  const button = $("poolAdsImport");
+  if (button) {
+    button.disabled = ads.loading || selectedCount === 0;
+    button.textContent = selectedCount ? `导入所选（${selectedCount}）` : "导入所选";
+  }
+  const status = $("poolAdsStatus");
+  if (status && !ads.loading) {
+    if (ads.error) {
+      status.textContent = "读取 AdsPower 环境失败";
+      return;
+    }
+    const summary = ads.summary || {};
+    const needAccount = summary.need_account ? ` · 需填账号 ${summary.need_account}` : "";
+    status.textContent = `共 ${summary.total ?? ads.items.length} 个环境 · 已绑定 ${summary.bound ?? 0} · 已过期 ${summary.expired ?? 0} · 可导入 ${summary.available ?? 0}${needAccount}`;
+  }
+}
+
+function adsBadge(text, tone) {
+  return el("span", `pool-ads-badge${tone ? ` is-${tone}` : ""}`, text);
+}
+
+function renderAdsList() {
+  const list = $("poolAdsList");
+  if (!list) return;
+  list.replaceChildren();
+  if (ads.loading) {
+    list.append(el("p", "pool-ads-empty", "正在读取 AdsPower 环境…"));
+    updateAdsSelection();
+    return;
+  }
+  if (ads.error) {
+    list.append(el("p", "pool-ads-empty", ads.error));
+    updateAdsSelection();
+    return;
+  }
+  const rows = adsFiltered();
+  if (!rows.length) {
+    list.append(el("p", "pool-ads-empty", "没有匹配的环境"));
+    updateAdsSelection();
+    return;
+  }
+  for (const item of rows) {
+    const bound = Boolean(item.bound_account);
+    const row = el("div", "pool-ads-row");
+    row.dataset.envId = item.profile_id;
+    if (bound) row.classList.add("is-bound");
+    if (item.expired) row.classList.add("is-expired");
+
+    const check = el("input", "pool-ads-check");
+    check.type = "checkbox";
+    check.checked = ads.selected.has(item.profile_id);
+    check.disabled = bound;
+    check.setAttribute("aria-label", `选择环境 ${item.profile_no || item.profile_id}`);
+    check.addEventListener("change", () => {
+      if (check.checked) ads.selected.add(item.profile_id);
+      else ads.selected.delete(item.profile_id);
+      updateAdsSelection();
+    });
+
+    const main = el("div", "pool-ads-main");
+    main.append(el("strong", "", item.name || item.profile_id));
+    const meta = [
+      item.profile_no ? `No.${item.profile_no}` : "",
+      item.account ? `账号 ${item.account}` : "账号未识别",
+      item.group_name || "",
+      item.proxy_host ? `${item.proxy_host}${item.proxy_port ? `:${item.proxy_port}` : ""}` : "",
+    ].filter(Boolean);
+    main.append(el("span", "pool-ads-meta", meta.join(" · ")));
+
+    const username = el("input", "pool-ads-username");
+    username.type = "text";
+    username.value = ads.usernames[item.profile_id] ?? item.account ?? "";
+    username.placeholder = "登录账号";
+    username.disabled = bound;
+    username.setAttribute("aria-label", `环境 ${item.profile_no || item.profile_id} 的登录账号`);
+    username.addEventListener("input", () => {
+      ads.usernames[item.profile_id] = username.value;
+    });
+
+    const badges = el("div", "pool-ads-badges");
+    if (bound) badges.append(adsBadge(`已绑定 ${item.bound_account.name}`, "bound"));
+    if (item.expired) badges.append(adsBadge("已过期", "expired"));
+    if (item.stopped) badges.append(adsBadge("已停用"));
+    if (!bound && !item.account) badges.append(adsBadge("需填账号", "warn"));
+    if (!bound && item.account && !item.expired && !item.stopped) {
+      badges.append(adsBadge("可导入", "ready"));
+    }
+
+    row.append(check, main, username, badges);
+    list.append(row);
+  }
+  updateAdsSelection();
+}
+
+async function loadAdsProfiles(refresh = false) {
+  if (ads.loading) return;
+  ads.loading = true;
+  ads.error = "";
+  const error = $("poolAdsError");
+  if (error) error.textContent = "";
+  const status = $("poolAdsStatus");
+  if (status) status.textContent = "正在读取 AdsPower 环境…";
+  renderAdsList();
+  try {
+    const url = `/api/adspower/profiles${refresh ? "?refresh=1" : ""}`;
+    const { response, payload } = await fetchJson(url, { cache: "no-store" },
+      { timeoutMs: 25000, allowInvalidJson: true });
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    ads.items = Array.isArray(payload.items) ? payload.items : [];
+    ads.summary = payload.summary || {};
+    const available = new Set(
+      ads.items.filter((item) => !item.bound_account).map((item) => item.profile_id),
+    );
+    ads.selected = new Set([...ads.selected].filter((id) => available.has(id)));
+    const site = $("poolAdsSite");
+    if (site && !site.value.trim()) site.value = adsSiteDefault($("poolAdsPlatform")?.value);
+  } catch (exc) {
+    ads.items = [];
+    ads.summary = {};
+    const message = String(exc?.message || exc);
+    ads.error = message === "HTTP 404"
+      ? "服务端没有加载 ADS 导入接口，请重启程序后再试"
+      : message;
+    if (error) error.textContent = ads.error;
+  } finally {
+    ads.loading = false;
+    renderAdsList();
+    updateAdsSelection();
+  }
+}
+
+function openAdsDialog() {
+  const dialog = adsDialog();
+  if (!dialog) return;
+  ads.selected = new Set();
+  ads.usernames = {};
+  ads.error = "";
+  const search = $("poolAdsSearch");
+  if (search) search.value = "";
+  const platform = $("poolAdsPlatform");
+  if (platform) platform.value = "auto";
+  const site = $("poolAdsSite");
+  if (site) site.value = adsSiteDefault("crown_member");
+  const error = $("poolAdsError");
+  if (error) error.textContent = "";
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  loadAdsProfiles(true);
+}
+
+function closeAdsDialog() {
+  const dialog = adsDialog();
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function submitAdsImport() {
+  const error = $("poolAdsError");
+  if (error) error.textContent = "";
+  const selected = ads.items
+    .filter((item) => !item.bound_account && ads.selected.has(item.profile_id))
+    .map((item) => item.profile_id);
+  if (!selected.length) {
+    if (error) error.textContent = "请先选择要导入的环境";
+    return;
+  }
+  const platform = $("poolAdsPlatform")?.value || "auto";
+  const baseUrl = $("poolAdsSite")?.value.trim() || "";
+  if (["crown_member", "crown_backend"].includes(platform) && !baseUrl) {
+    if (error) error.textContent = "请填写站点地址";
+    return;
+  }
+  const usernames = {};
+  for (const envId of selected) {
+    const item = ads.items.find((entry) => entry.profile_id === envId);
+    usernames[envId] = String(ads.usernames[envId] ?? item?.account ?? "").trim();
+    if (!usernames[envId]) {
+      if (error) error.textContent = `请填写环境 ${item?.profile_no || envId} 的登录账号`;
+      return;
+    }
+  }
+  const button = $("poolAdsImport");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导入中…";
+  }
+  try {
+    const result = await postJson("/api/pool/import-envs", {
+      platform,
+      base_url: baseUrl,
+      env_ids: selected,
+      usernames,
+      enabled: true,
+    });
+    const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+    if (skipped.length) {
+      const detail = skipped
+        .map((entry) => `${entry.env_id}：${entry.reason}`)
+        .join("；");
+      showToast(result.message || "部分环境未导入");
+      await loadAdsProfiles(true);
+      if (error && !ads.error) {
+        error.textContent = `已导入 ${(result.created || []).length} 个，跳过 ${skipped.length} 个。${detail}`;
+      }
+      refresh();
+      return;
+    }
+    closeAdsDialog();
+    showToast(result.message || "已导入所选环境");
+    refresh();
+  } catch (exc) {
+    const message = String(exc?.message || exc);
+    if (error) {
+      error.textContent = message === "HTTP 404"
+        ? "服务端没有加载 ADS 导入接口，请重启程序后再试"
+        : message;
+    }
+  } finally {
+    updateAdsSelection();
+  }
+}
+
 async function submitDialog(event) {
   event.preventDefault();
   const error = $("poolFormError");
@@ -659,6 +1075,31 @@ function isPoolPage() {
 export function bindPoolEvents() {
   $("poolCheckAll")?.addEventListener("click", checkAll);
   $("poolAdd")?.addEventListener("click", openDialog);
+  $("poolImportAds")?.addEventListener("click", openAdsDialog);
+  $("poolCredClose")?.addEventListener("click", closeCredentials);
+  $("poolCredCancel")?.addEventListener("click", closeCredentials);
+  $("poolCredForm")?.addEventListener("submit", submitCredentials);
+  $("poolCredDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("poolCredDialog")) closeCredentials();
+  });
+  $("poolAdsClose")?.addEventListener("click", closeAdsDialog);
+  $("poolAdsCancel")?.addEventListener("click", closeAdsDialog);
+  $("poolAdsRefresh")?.addEventListener("click", () => loadAdsProfiles(true));
+  $("poolAdsSearch")?.addEventListener("input", renderAdsList);
+  $("poolAdsPlatform")?.addEventListener("change", applyAdsPlatformDefaults);
+  $("poolAdsSelectAll")?.addEventListener("change", (event) => {
+    const checked = Boolean(event.target.checked);
+    for (const item of adsFiltered()) {
+      if (!adsImportable(item)) continue;
+      if (checked) ads.selected.add(item.profile_id);
+      else ads.selected.delete(item.profile_id);
+    }
+    renderAdsList();
+  });
+  $("poolAdsImport")?.addEventListener("click", submitAdsImport);
+  $("poolAdsDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("poolAdsDialog")) closeAdsDialog();
+  });
   $("poolEmptyAdd")?.addEventListener("click", () => {
     const accounts = snapshot?.accounts || [];
     if (accounts.length && filteredAccounts(accounts).length === 0) resetView();

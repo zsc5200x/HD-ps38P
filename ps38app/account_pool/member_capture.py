@@ -12,7 +12,11 @@ from .crown_member import MAX_RESPONSE_BYTES, _parse_member_body
 
 def origin(url: str) -> str:
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}" if parts.scheme in {"http", "https"} and parts.hostname else ""
+    return (
+        f"{parts.scheme}://{parts.netloc}"
+        if parts.scheme in {"http", "https"} and parts.hostname
+        else ""
+    )
 
 
 def clean_meta(value: Any) -> Dict[str, str]:
@@ -43,7 +47,10 @@ class MemberCapture:
         try:
             request = request or response.request
             parts = urlsplit(response.url)
-            if not parts.path.endswith("/transform.php") or response.status != 200:
+            if (
+                not parts.path.endswith(("/transform.php", "/transform_nl.php"))
+                or response.status != 200
+            ):
                 return
             query = parse_qs(parts.query)
             fields = parse_qs(request.post_data or "")
@@ -51,7 +58,11 @@ class MemberCapture:
             if not (operation.startswith("chk_login") or operation == "get_member_data"):
                 return
             text = response.text()
-            if len(text) > MAX_RESPONSE_BYTES or "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
+            if (
+                len(text) > MAX_RESPONSE_BYTES
+                or "<!DOCTYPE" in text.upper()
+                or "<!ENTITY" in text.upper()
+            ):
                 return
             if operation.startswith("chk_login"):
                 root = ET.fromstring(text)
@@ -65,12 +76,16 @@ class MemberCapture:
                     return
                 uid = (fields.get("uid") or query.get("uid") or [""])[0]
             ver = (query.get("ver") or fields.get("ver") or [""])[0]
-            if not uid or not ver:
+            if not uid:
                 return
-            self.meta = clean_meta({
-                "uid": uid, "ver": ver, "origin": origin(response.url),
-                "langx": (fields.get("langx") or ["zh-cn"])[0],
-            })
+            self.meta = clean_meta(
+                {
+                    "uid": uid,
+                    "ver": ver,
+                    "origin": origin(response.url),
+                    "langx": (fields.get("langx") or ["zh-cn"])[0],
+                }
+            )
             self.authenticated = True
         except Exception:
             # Navigations and captcha responses may dispose the response body.
@@ -134,14 +149,19 @@ class MemberCapture:
                     if query.get(key):
                         meta.setdefault(key, query[key][0])
                 if not meta.get("uid") or not meta.get("ver"):
-                    html = frame.content()[:512 * 1024]
-                    for key, aliases in (("uid", "uid|userid|user_id|loginuid"),
-                                         ("ver", "ver|mygamever|gamever")):
-                        match = re.search(r"\b(?:" + aliases + r")[\s\"']*[:=][\s\"']*([0-9A-Za-z._-]{4,})",
-                                          html, re.IGNORECASE)
+                    html = frame.content()[: 512 * 1024]
+                    for key, aliases in (
+                        ("uid", "uid|userid|user_id|loginuid"),
+                        ("ver", "ver|mygamever|gamever"),
+                    ):
+                        match = re.search(
+                            r"\b(?:" + aliases + r")[\s\"']*[:=][\s\"']*([0-9A-Za-z._-]{4,})",
+                            html,
+                            re.IGNORECASE,
+                        )
                         if match:
                             meta.setdefault(key, match.group(1))
-                if meta.get("uid") and meta.get("ver") and not meta.get("origin"):
+                if meta.get("uid") and not meta.get("origin"):
                     meta["origin"] = origin(frame.url)
             except Exception:
                 continue

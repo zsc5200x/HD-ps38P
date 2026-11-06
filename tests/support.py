@@ -26,6 +26,7 @@ def isolated_config(root: Path) -> Dict[str, Any]:
         copy_orders_db_path=root / "copy_orders.sqlite3",
         monitor_db_path=root / "monitor.sqlite3",
         profile_dir=root / "profile",
+        ps38_captcha_dir=root / "captcha",
         pool_db_path=root / "accounts.sqlite3",
         pool_dir=root / "accounts",
         merge_db_path=root / "fixture_merge.sqlite3",

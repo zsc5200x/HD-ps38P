@@ -840,7 +840,7 @@ function buildCopySourceTable(rows) {
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
   for (const label of [
-    "联赛", "主队 vs 客队", "比分", "盘口", "水位", "金额", "订单号", "代理", "会员",
+    "下单时间", "联赛", "主队 vs 客队", "比分", "盘口", "水位", "金额", "订单号", "代理", "会员",
   ]) {
     headRow.append(el("th", "", label));
   }
@@ -850,9 +850,13 @@ function buildCopySourceTable(rows) {
   const ordered = [...rows].sort(
     (a, b) => (Number(a.created_ms) || 0) - (Number(b.created_ms) || 0),
   );
+  const tz = myEvents().tz;
   for (const row of ordered) {
     const tr = document.createElement("tr");
+    const timeCell = cell(formatClock(row.created_ms, tz), "time");
+    timeCell.title = formatTime(row, "created", tz);
     tr.append(
+      timeCell,
       cell(row.league || "—", "league"),
       cell(formatTeams(row.teams) || "—", "teams"),
       cell(row.score || "—", "score"),

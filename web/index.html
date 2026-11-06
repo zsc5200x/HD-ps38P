@@ -80,6 +80,7 @@
           <button id="mergeRefresh" class="button ghost" type="button">刷新</button>
         </div>
         <div class="page-action-group" data-page-actions="pool" hidden>
+          <button id="poolImportAds" class="button ghost" type="button">ADS 账号导入</button>
           <button id="poolCheckAll" class="button ghost" type="button">全部检测</button>
           <button id="poolAdd" class="button primary" type="button">新增账号</button>
         </div>
@@ -243,7 +244,7 @@
                 <div class="copy-kpi"><span>掉线会员</span><strong id="copyOfflineMembers" class="copy-tone-danger">—</strong></div>
               </div>
               <div class="copy-board-grid copy-board-tasks">
-                <div class="copy-kpi"><span>等待任务</span><strong id="copyQueuedTasks" class="copy-tone-muted">—</strong></div>
+                <div class="copy-kpi"><span title="含 10 秒待跟单窗口中的批次与已冻结待执行的订单组">等待任务</span><strong id="copyQueuedTasks" class="copy-tone-muted">—</strong></div>
                 <div class="copy-kpi"><span>执行任务</span><strong id="copyActiveTasks" class="copy-tone-blue">—</strong></div>
                 <div class="copy-kpi copy-kpi-rate">
                   <span>累计成功率</span>
@@ -854,7 +855,79 @@
     </form>
   </dialog>
 
+  <dialog id="poolCredDialog" class="pool-dialog" aria-labelledby="poolCredTitle">
+    <form id="poolCredForm" novalidate>
+      <header class="pool-dialog-head">
+        <h2 id="poolCredTitle">账号凭据</h2>
+        <button id="poolCredClose" class="pool-dialog-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="pool-form-grid">
+        <label class="pool-field">
+          <span>登录账号</span>
+          <input id="poolCredUsername" maxlength="128" autocomplete="username">
+        </label>
+        <label class="pool-field">
+          <span>密码 <em>留空保持不变</em></span>
+          <input id="poolCredPassword" type="password" autocomplete="current-password" placeholder="留空保持不变">
+        </label>
+        <label class="pool-field pool-field-wide">
+          <span>TOTP 私钥 <em>留空保持不变</em></span>
+          <input id="poolCredTotp" maxlength="128" autocomplete="off" placeholder="Base32 密钥，例如 JBSWY3DPEHPK3PXP">
+        </label>
+      </div>
+      <p id="poolCredHint" class="pool-form-hint"></p>
+      <p id="poolCredError" class="pool-form-error" role="alert"></p>
+      <footer class="pool-dialog-actions">
+        <button class="button ghost" type="button" id="poolCredCancel">取消</button>
+        <button class="button primary" type="submit">保存凭据</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="poolAdsDialog" class="pool-dialog pool-dialog-wide" aria-labelledby="poolAdsTitle">
+    <div class="pool-ads-shell">
+      <header class="pool-dialog-head">
+        <h2 id="poolAdsTitle">ADS 账号导入</h2>
+        <button id="poolAdsClose" class="pool-dialog-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="pool-ads-controls">
+        <label class="pool-field">
+          <span>账号类型</span>
+          <select id="poolAdsPlatform">
+            <option value="auto" selected>自动识别（按环境名）</option>
+            <option value="crown_member">皇冠会员</option>
+            <option value="crown_backend">皇冠后台</option>
+            <option value="ps38_backend">PS38 后台</option>
+          </select>
+        </label>
+        <label class="pool-field">
+          <span>站点地址（皇冠）</span>
+          <input id="poolAdsSite" placeholder="https://..." autocomplete="url">
+        </label>
+        <label class="pool-field">
+          <span>搜索</span>
+          <input id="poolAdsSearch" type="search" placeholder="环境号 / 名称 / 账号" autocomplete="off">
+        </label>
+        <button id="poolAdsRefresh" class="button ghost pool-ads-refresh" type="button">刷新环境</button>
+      </div>
+      <div class="pool-ads-summary">
+        <span id="poolAdsStatus">正在读取 AdsPower 环境…</span>
+        <label class="pool-ads-selectall">
+          <input id="poolAdsSelectAll" type="checkbox">
+          全选可导入
+        </label>
+      </div>
+      <div id="poolAdsList" class="pool-ads-list" role="list"></div>
+      <p class="pool-form-hint">导入后可在账号卡片点「凭据」保存登录账号、密码和 TOTP 私钥。</p>
+      <p id="poolAdsError" class="pool-form-error" role="alert"></p>
+      <footer class="pool-dialog-actions">
+        <button class="button ghost" type="button" id="poolAdsCancel">取消</button>
+        <button class="button primary" type="button" id="poolAdsImport" disabled>导入所选</button>
+      </footer>
+    </div>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="static/app.js?v=20261103-35"></script>
+  <script type="module" src="static/app.js?v=20261105-6"></script>
 </body>
 </html>

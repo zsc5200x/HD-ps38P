@@ -1077,3 +1077,218 @@
 .pool-field[hidden] {
   display: none !important;
 }
+
+/* ── AdsPower import dialog ─────────────────────────────────────────────── */
+
+.pool-dialog.pool-dialog-wide {
+  width: min(780px, calc(100vw - 28px));
+}
+
+.pool-ads-shell {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.pool-ads-controls {
+  display: grid;
+  grid-template-columns: minmax(120px, 150px) minmax(0, 1.15fr) minmax(0, 1fr) auto;
+  gap: 10px 12px;
+  align-items: end;
+  padding: 14px 18px 0;
+}
+
+.pool-ads-refresh {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.pool-ads-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 18px 8px;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.pool-ads-selectall {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pool-ads-list {
+  display: flex;
+  min-height: 120px;
+  max-height: min(46vh, 420px);
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 18px;
+  padding: 8px 2px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.pool-ads-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) minmax(120px, 0.55fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(8, 14, 23, 0.45);
+}
+
+.pool-ads-row.is-bound {
+  opacity: 0.6;
+}
+
+.pool-ads-row.is-expired {
+  border-color: rgba(255, 120, 140, 0.32);
+}
+
+.pool-ads-check {
+  width: 14px;
+  height: 14px;
+  accent-color: #42e6a4;
+}
+
+.pool-ads-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pool-ads-main strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-ads-meta {
+  overflow: hidden;
+  color: var(--muted-2);
+  font-size: 0.64rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-ads-username {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(6, 11, 19, 0.55);
+  font-size: 0.7rem;
+}
+
+.pool-ads-username:focus {
+  border-color: rgba(66, 230, 164, 0.42);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(66, 230, 164, 0.07);
+}
+
+.pool-ads-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pool-ads-badge {
+  padding: 2px 7px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.6rem;
+  white-space: nowrap;
+}
+
+.pool-ads-badge.is-bound {
+  color: #8fb9ff;
+  border-color: rgba(120, 165, 255, 0.35);
+}
+
+.pool-ads-badge.is-expired {
+  color: #ff9cad;
+  border-color: rgba(255, 120, 140, 0.35);
+}
+
+.pool-ads-badge.is-warn {
+  color: #ffd28a;
+  border-color: rgba(255, 196, 100, 0.35);
+}
+
+.pool-ads-badge.is-ready {
+  color: #6ff0b8;
+  border-color: rgba(66, 230, 164, 0.3);
+}
+
+.pool-ads-empty {
+  padding: 26px 12px;
+  color: var(--muted-2);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .pool-ads-controls {
+    grid-template-columns: 1fr;
+    padding-inline: 14px;
+  }
+
+  .pool-ads-summary {
+    padding-inline: 14px;
+  }
+
+  .pool-ads-list {
+    margin-inline: 14px;
+  }
+
+  .pool-ads-row {
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .pool-ads-username,
+  .pool-ads-badges {
+    grid-column: 2;
+  }
+
+  .pool-ads-badges {
+    justify-content: flex-start;
+  }
+}
+
+/* 出口网络：一眼看出这个号走代理还是本机 */
+.pool-card-network {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 2px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: rgba(96, 130, 170, 0.10);
+  border: 1px solid rgba(96, 130, 170, 0.22);
+}
+.pool-card-network-icon { color: #7ea8d8; font-size: 12px; }
+.pool-card-network-text { overflow-wrap: anywhere; }
+.pool-card-network-text.is-proxy { color: #6fd3a6; }
+.pool-card-network-text.is-direct { color: #d9b26a; }

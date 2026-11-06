@@ -124,6 +124,22 @@ class FollowStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL,
                     payload TEXT NOT NULL, FOREIGN KEY(group_id) REFERENCES follow_groups(id)
                 );
+                -- 主页 20 秒展示批次冻结前的 10 秒待跟单窗口；行本身就是倒计时状态。
+                CREATE TABLE IF NOT EXISTS follow_pending (
+                    id TEXT PRIMARY KEY, source_batch_key TEXT NOT NULL,
+                    page_batch_no TEXT NOT NULL, freeze_at_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS follow_pending_open
+                    ON follow_pending(status,freeze_at_ms);
+                CREATE INDEX IF NOT EXISTS follow_pending_batch
+                    ON follow_pending(source_batch_key,status);
+                CREATE TABLE IF NOT EXISTS follow_pending_members (
+                    source TEXT NOT NULL, member_identity TEXT NOT NULL, order_id TEXT NOT NULL,
+                    pending_id TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(source,member_identity,order_id),
+                    FOREIGN KEY(pending_id) REFERENCES follow_pending(id) ON DELETE CASCADE
+                );
             """)
             connection.execute(
                 "INSERT OR IGNORE INTO follow_rule VALUES ('default',?)", (dump(DEFAULT_RULE),)
@@ -253,6 +269,31 @@ class FollowStore:
         )
 
     @staticmethod
+    def account_inflight(connection, exclude_group_id=""):
+        """按账号统计在途订单数：认领表 + 正在执行的组（同一组只算一次）。"""
+        counts = {}
+        seen = {}
+        rows = connection.execute("SELECT group_id, account_id FROM follow_claims").fetchall()
+        for group_id_value, account_id_value in rows:
+            account_id = str(account_id_value or "")
+            if not account_id:
+                continue
+            seen.setdefault(account_id, set()).add(str(group_id_value))
+        rows = connection.execute(
+            "SELECT id, account_id FROM follow_groups "
+            "WHERE status IN ('READY','PREPARING','SUBMITTING') AND account_id<>'' AND id<>?",
+            (exclude_group_id,),
+        ).fetchall()
+        for group_id_value, account_id_value in rows:
+            account_id = str(account_id_value or "")
+            if not account_id:
+                continue
+            seen.setdefault(account_id, set()).add(str(group_id_value))
+        for account_id, group_ids in seen.items():
+            counts[account_id] = len(group_ids)
+        return counts
+
+    @staticmethod
     def release_claim(connection, group_id, owner_id):
         connection.execute(
             "DELETE FROM follow_claims WHERE group_id=? AND owner_id=?", (group_id, owner_id)
@@ -311,6 +352,90 @@ class FollowStore:
                 member["member_identity"],
                 member["order_id"],
                 group_id,
+                dump(member),
+            ),
+        )
+
+    # ── 10 秒待跟单窗口：倒计时与成员都落库，重启后按原截止时间恢复 ──
+    @staticmethod
+    def pending_batches(connection):
+        return [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT payload FROM follow_pending WHERE status='OPEN' ORDER BY freeze_at_ms,rowid"
+            )
+        ]
+
+    @staticmethod
+    def pending_for_key(connection, source_batch_key):
+        row = connection.execute(
+            "SELECT payload FROM follow_pending WHERE status='OPEN' AND source_batch_key=? "
+            "ORDER BY freeze_at_ms DESC,rowid DESC LIMIT 1",
+            (str(source_batch_key),),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    @staticmethod
+    def save_pending(connection, pending):
+        connection.execute(
+            "INSERT INTO follow_pending"
+            "(id,source_batch_key,page_batch_no,freeze_at_ms,status,created_at,payload) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET freeze_at_ms=excluded.freeze_at_ms,"
+            "status=excluded.status,payload=excluded.payload",
+            (
+                pending["id"],
+                pending["source_batch_key"],
+                pending["page_batch_no"],
+                int(pending["freeze_at_ms"]),
+                pending["status"],
+                pending["created_at"],
+                dump(pending),
+            ),
+        )
+
+    @staticmethod
+    def drop_pending(connection, pending_id):
+        connection.execute("DELETE FROM follow_pending WHERE id=?", (str(pending_id),))
+
+    @staticmethod
+    def pending_count(connection):
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) FROM follow_pending WHERE status='OPEN'"
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def pending_members(connection, pending_id):
+        return [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT payload FROM follow_pending_members WHERE pending_id=? ORDER BY rowid",
+                (str(pending_id),),
+            )
+        ]
+
+    @staticmethod
+    def pending_contains_member(connection, member):
+        return (
+            connection.execute(
+                "SELECT 1 FROM follow_pending_members "
+                "WHERE source=? AND member_identity=? AND order_id=?",
+                (member["source"], member["member_identity"], member["order_id"]),
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def add_pending_member(connection, pending_id, member):
+        connection.execute(
+            "INSERT OR IGNORE INTO follow_pending_members VALUES (?,?,?,?,?)",
+            (
+                member["source"],
+                member["member_identity"],
+                member["order_id"],
+                str(pending_id),
                 dump(member),
             ),
         )
@@ -457,6 +582,9 @@ class FollowStore:
                 FROM current_groups WHERE effective_status='SUCCEEDED' GROUP BY currency"""
             ).fetchall()
             active_tasks = connection.execute("SELECT COUNT(*) FROM follow_claims").fetchone()[0]
+            pending_tasks = connection.execute(
+                "SELECT COUNT(*) FROM follow_pending WHERE status='OPEN'"
+            ).fetchone()[0]
             queued_tasks = connection.execute(
                 "SELECT COUNT(*) FROM follow_groups g WHERE status IN ('READY','WAIT_ACCOUNT','WAIT_MARKET','RETRY_WAIT') "
                 "AND NOT EXISTS (SELECT 1 FROM follow_claims c WHERE c.group_id=g.id)"
@@ -504,6 +632,7 @@ class FollowStore:
                 "message": message,
                 "active_tasks": active_tasks,
                 "queued_tasks": queued_tasks,
+                "pending_tasks": pending_tasks,
             },
             "summary": summary,
             "rows": rows,

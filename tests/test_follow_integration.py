@@ -33,7 +33,7 @@ class FollowIntegrationTests(unittest.TestCase):
             {
                 "code": "560",
                 "ticket_id": "LOCAL-RECEIPT-1",
-                "golds": "30",
+                "golds": "50",
                 "ioratio": "0.93",
             }
         )
@@ -127,7 +127,7 @@ class FollowIntegrationTests(unittest.TestCase):
         if action == "FT_bet":
             self.assertEqual((fields["gid"], fields["chose_team"]), ("line-1", "C"))
             self.assertEqual(
-                (fields["con"], fields["ratio"], fields["golds"]), ("-1", "-100", "30")
+                (fields["con"], fields["ratio"], fields["golds"]), ("-1", "-100", "50")
             )
             if self.bet_exception is not None:
                 raise self.bet_exception
@@ -176,13 +176,15 @@ class FollowIntegrationTests(unittest.TestCase):
             rows.append(row)
             self.commit(rows)
             self.service.run_once()
-        # 主页的 8 位批次首次收到即处理；同批次后续源单不追加、不重发。
+        # 首单进入 10 秒待跟单窗口，同批次第二单并入后才冻结推送。
+        self.now += source_samples.PENDING_SECONDS
+        self.service.run_once()
         page = self.request("GET", "/api/follow")[1]
         self.assertEqual(page["total"], 1)
         group = page["rows"][0]
         self.assertEqual(len(group["source_batch_no"]), 8)
         self.assertTrue(group["source_batch_no"].isdigit())
-        self.assertEqual((group["order_count"], group["source_stake"]), (1, "300"))
+        self.assertEqual((group["order_count"], group["source_stake"]), (2, "500"))
 
     def test_merged_order_reaches_real_adapter_and_confirmed_receipt_api(self):
         self.process_group()
@@ -193,13 +195,15 @@ class FollowIntegrationTests(unittest.TestCase):
         self.assertEqual((group["status"], group["receipt_id"]), ("SUCCEEDED", "LOCAL-RECEIPT-1"))
         self.assertEqual(group["account_id"], "test-account")
         self.assertEqual(
-            (group["order_count"], group["source_stake"], group["accepted_stake"]), (1, "300", "30")
+            (group["order_count"], group["source_stake"], group["accepted_stake"]),
+            (2, "500", "50"),
         )
         self.assertEqual((group["target_side"], group["target_line"]), ("AWAY", "0.5"))
         status, detail = self.request("GET", f"/api/follow/groups/{group['id']}")
         self.assertEqual(status, 200)
-        self.assertEqual(len(detail["members"]), 1)
-        self.assertEqual(detail["members"][0]["order_id"], "source-1")
+        self.assertEqual(
+            [member["order_id"] for member in detail["members"]], ["source-1", "source-2"]
+        )
         self.assertEqual(len(detail["attempts"]), 1)
         for secret in ("fixture-uid", "fixture-ver", "fixture=cookie", "raw_json"):
             self.assertNotIn(secret, json.dumps(detail))
@@ -224,12 +228,13 @@ class FollowIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         group = page["rows"][0]
         self.assertEqual(
-            (group["currency"], group["source_stake"], group["target_stake"]), ("CNY", "300", "30")
+            (group["currency"], group["source_stake"], group["target_stake"]),
+            ("CNY", "500", "50"),
         )
         self.assertEqual(group["receipt_id"], "LOCAL-RECEIPT-1")
         _, detail = self.request("GET", f"/api/follow/groups/{group['id']}")
         self.assertEqual(
-            [member["reported_currency"] for member in detail["members"]], ["THB"]
+            [member["reported_currency"] for member in detail["members"]], ["THB", "THB"]
         )
-        self.assertEqual([member["currency"] for member in detail["members"]], ["CNY"])
+        self.assertEqual([member["currency"] for member in detail["members"]], ["CNY", "CNY"])
         self.assertEqual(sum(call["p"] == "FT_bet" for call in self.calls), 1)

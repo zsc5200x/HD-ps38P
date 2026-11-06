@@ -1,7 +1,7 @@
 """规则校验与唯一方向变换入口。"""
 
 import re
-from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING
 
 from .source import decimal_value, number_text
 
@@ -137,9 +137,11 @@ def group_stake(total, rule):
     value = decimal_value(rule["amount_value"], "规则金额")
     if rule["amount_mode"] == "ratio":
         value = decimal_value(total, "组金额") * value / 100
-    value = value.quantize(Decimal("1"), rounding=ROUND_DOWN)
+    # 提交金额必须是整数，且不能因为 99.99→99 掉到平台最低投注以下：
+    # 一律向上取整（99.01→100，100.5→101）。
+    value = value.quantize(Decimal("1"), rounding=ROUND_CEILING)
     if value < 1:
-        raise ValueError("组目标金额向下取整后不足 1")
+        raise ValueError("组目标金额取整后不足 1")
     return number_text(value)
 
 

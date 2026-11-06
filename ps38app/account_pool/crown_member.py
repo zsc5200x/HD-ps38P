@@ -36,8 +36,10 @@ def cookie_header(storage_state: Dict[str, Any], base_url: str) -> str:
         if not isinstance(cookie, dict):
             continue
         domain = str(cookie.get("domain") or "").lower()
-        if not (host == domain or (domain.startswith(".") and
-                                   (host == domain[1:] or host.endswith(domain)))):
+        if not (
+            host == domain
+            or (domain.startswith(".") and (host == domain[1:] or host.endswith(domain)))
+        ):
             continue
         path = str(cookie.get("path") or "/")
         if not "/transform.php".startswith(path):
@@ -62,6 +64,11 @@ def _parse_member_body(body: bytes) -> Dict[str, Any]:
         return {"status": "unavailable", "message": "会员在线检查返回格式异常"}
     if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
         return {"status": "unavailable", "message": "会员在线检查返回 HTML，可能是登录页"}
+    lowered = text.lower()
+    if "table id error" in lowered:
+        return {"status": "expired", "message": "皇冠 uid 已失效（table id error）"}
+    if "doublelogin" in lowered:
+        return {"status": "conflict", "message": "皇冠提示重复登录，请确认该会员是否在其他地方登录"}
     try:
         root = ET.fromstring(text)
     except (ET.ParseError, ValueError):
@@ -77,7 +84,10 @@ def _parse_member_body(body: bytes) -> Dict[str, Any]:
     message = values.get("msg", "")
     if code == "error":
         if message.lower() == "doublelogin":
-            return {"status": "conflict", "message": "皇冠提示重复登录，请确认该会员是否在其他地方登录"}
+            return {
+                "status": "conflict",
+                "message": "皇冠提示重复登录，请确认该会员是否在其他地方登录",
+            }
         return {"status": "expired", "message": "皇冠会员会话已失效，请重新登录"}
     if any(values.get(key) for key in ("enable", "currency", "maxcredit", "nowcredit", "cash")):
         balance = None
@@ -103,7 +113,9 @@ def _parse_member_body(body: bytes) -> Dict[str, Any]:
             "message": "皇冠会员在线检查通过",
             "balance": balance,
             "balance_currency": currency,
-            "balance_checked_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "balance_checked_at": datetime.now(timezone.utc)
+            .astimezone()
+            .isoformat(timespec="seconds"),
         }
     return {"status": "unavailable", "message": "会员在线检查未返回可识别的登录信息"}
 
@@ -116,7 +128,9 @@ def _is_ip_literal(host: str) -> bool:
         return False
 
 
-def preferred_origin(meta: Dict[str, Any], storage_state: Dict[str, Any], base_url: str = "") -> str:
+def preferred_origin(
+    meta: Dict[str, Any], storage_state: Dict[str, Any], base_url: str = ""
+) -> str:
     """优先使用账号登记的域名入口，而不是登录后被跳转到的真实 IP。
 
     皇冠登录成功后浏览器会被跳到后端 IP，抓会话时记录的 origin 就是那个 IP。
@@ -145,7 +159,10 @@ def ping_member(
     *,
     timeout: int = 10,
     ignore_https_errors: bool = False,
-    transport: Optional[Callable[[str, Dict[str, str], Dict[str, str], int], Tuple[int, bytes]]] = None,
+    transport: Optional[
+        Callable[[str, Dict[str, str], Dict[str, str], int], Tuple[int, bytes]]
+    ] = None,
+    require_ver: bool = True,
 ) -> Dict[str, Any]:
     """POST ``get_member_data`` with the saved cookies/uid/ver.
 
@@ -162,14 +179,13 @@ def ping_member(
             return {"status": "unavailable", "message": "会员站点地址无效"}
     except ValueError:
         return {"status": "unavailable", "message": "会员站点地址无效"}
-    if not uid or not ver:
+    if not uid or (require_ver and not ver):
         return {"status": "unavailable", "message": "会话缺少 uid/ver，需要重新登录补全"}
     cookie = cookie_header(storage_state, origin)
     if not cookie:
         return {"status": "expired", "message": "保存的会员 Cookie 已不存在，请重新登录"}
 
-    fields = {"ver": ver, "p": "get_member_data", "uid": uid,
-              "langx": langx, "change": "all"}
+    fields = {"ver": ver, "p": "get_member_data", "uid": uid, "langx": langx, "change": "all"}
     url = origin + "/transform.php?" + urlencode({"ver": ver})
     headers = {
         "accept": "*/*",
@@ -179,8 +195,11 @@ def ping_member(
         "origin": origin,
         "referer": origin + "/",
         "content-type": "application/x-www-form-urlencoded",
-        "user-agent": str(meta.get("user_agent") or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"),
+        "user-agent": str(
+            meta.get("user_agent")
+            or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+        ),
         "cookie": cookie,
     }
     data = urlencode(fields).encode("utf-8")
@@ -192,8 +211,9 @@ def ping_member(
             return {"status": "unavailable", "message": "会员在线检查暂时失败，稍后重试"}
     else:
         try:
-            status, body = _http_post(url, data, headers, timeout,
-                                      ignore_https_errors=ignore_https_errors)
+            status, body = _http_post(
+                url, data, headers, timeout, ignore_https_errors=ignore_https_errors
+            )
         except HTTPError as error:
             if error.code in (401, 440):
                 return {"status": "expired", "message": "皇冠会员明确拒绝当前会话"}
@@ -217,9 +237,43 @@ def ping_member(
     return _parse_member_body(bytes(body))
 
 
-def _http_post(url: str, data: bytes, headers: Dict[str, str], timeout: int,
-               *, ignore_https_errors: bool = False,
-               max_response_bytes: int = MAX_RESPONSE_BYTES) -> Tuple[int, bytes]:
+def _http_post(
+    url: str,
+    data: bytes,
+    headers: Dict[str, str],
+    timeout: int,
+    *,
+    ignore_https_errors: bool = False,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
+    proxy: Optional[Dict[str, str]] = None,
+) -> Tuple[int, bytes]:
+    # The AdsPower environment's SOCKS5 exit keeps the member request on the
+    # same IP as its login; local accounts keep the original direct opener.
+    if proxy:
+        from ..net import HttpClient
+
+        parsed = urlsplit(url)
+        if not parsed.hostname:
+            raise ValueError("皇冠会员站点地址无效")
+        client = HttpClient(
+            parsed.hostname,
+            scheme=parsed.scheme or "https",
+            port=parsed.port,
+            proxy=proxy,
+            timeout=max(5, int(timeout)),
+            user_agent=headers.get("User-Agent") or "",
+            verify=not ignore_https_errors,
+        )
+        try:
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            response = client.request("POST", path, headers=headers, body=data)
+            if len(response.body) > max_response_bytes:
+                raise ValueError("皇冠响应过大")
+            return response.status, response.body
+        finally:
+            client.close()
     # Crown's member routes may redirect to IPs with expired/mismatched certs.
     # Match hdproc only when explicitly enabled by the Crown provider; never
     # change the process-wide SSL context or PS38's verification policy.

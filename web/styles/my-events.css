@@ -933,6 +933,10 @@
 }
 .follow-source-table th.num,
 .follow-source-table td.num { text-align: center; }
+.follow-source-table td.time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 
 .my-events-library-btn {
   min-height: 28px;

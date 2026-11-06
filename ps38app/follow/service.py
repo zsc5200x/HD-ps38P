@@ -29,6 +29,9 @@ RETRYABLE_CROWN_CODES = frozenset(
 
 MIN_STAKE = Decimal("100")
 
+# 主页 20 秒展示批次进入跟单前，等待同批次后续源单的真实秒数。
+PENDING_SECONDS = 10.0
+
 
 _SERVICES = weakref.WeakValueDictionary()
 _SERVICES_LOCK = threading.RLock()
@@ -270,7 +273,15 @@ class FollowService:
             if self._dispatcher is None:
                 from .dispatcher import BoundedDispatcher
 
-                self._dispatcher = BoundedDispatcher(max_workers=2, on_done=self._wake.set)
+                try:
+                    workers = int(self.config.get("follow_parallel_attempts") or 5)
+                except (TypeError, ValueError):
+                    workers = 5
+                self._dispatcher = BoundedDispatcher(
+                    max_workers=max(1, min(20, workers)),
+                    per_account=1,
+                    on_done=self._wake.set,
+                )
             return self._dispatcher.submit(key, account_id, function, *args)
 
     def start(self):
@@ -420,6 +431,9 @@ class FollowService:
                 updated_at=iso_time(self.clock()),
             )
             self.store.save_group(connection, group)
+        # 未冻结的 10 秒待跟单窗口随暂停/缺口一起作废，避免恢复后补发旧窗口。
+        for pending in self.store.pending_batches(connection):
+            self.store.drop_pending(connection, pending["id"])
 
     def _events(self, cursor):
         connection = self._source_connect()
@@ -556,14 +570,6 @@ class FollowService:
                     batches = None if gap else self._copy_batches(events)
                 except (OSError, sqlite3.Error, KeyError, TypeError, ValueError):
                     batches = None
-                if batches is None and not gap:
-                    with self.store.connect() as connection:
-                        self.store.set_meta(
-                            connection,
-                            "message",
-                            "主页跟单批次暂不可用，已保留新单游标等待重试",
-                        )
-                    return
                 with self.store.connect(write=True) as connection:
                     # 源库读取期间另一服务可能已消费、暂停或改规则，不能写回旧游标。
                     if (
@@ -579,8 +585,21 @@ class FollowService:
                             connection, "message", "新单事件存在缺口，已暂停；请核对后重新启用"
                         )
                         return
+                    # 10 秒待跟单窗口按持久化的绝对截止时间判到期，重启不重新计时。
+                    if rule["enabled"]:
+                        self._freeze_pending_batches(connection, now)
+                    elif self.store.pending_count(connection):
+                        self._cancel_pending(connection)
+                    if batches is None:
+                        # 源单库暂不可用时不推进执行，避免把原单校验失败误判为跳过。
+                        self.store.set_meta(
+                            connection,
+                            "message",
+                            "主页跟单批次暂不可用，已保留新单游标等待重试",
+                        )
+                        return
                     self._ingest_copy_batches(
-                        connection, batches or [], rule, now, enabled=rule["enabled"]
+                        connection, batches, rule, now, enabled=rule["enabled"]
                     )
                     self.store.set_meta(connection, "cursor", next_cursor)
                     groups = self.store.active_groups(connection) if rule["enabled"] else []
@@ -769,75 +788,184 @@ class FollowService:
 
     def _ingest_copy_batches(self, connection, batches, rule, now, *, enabled=True):
         for batch in batches:
-            order_no = str(batch["order_no"])
-            if self.store.group_for_source_batch(connection, order_no):
-                continue
-            event_sources = batch.get("_event_sources") or batch.get("sources") or []
-            if any(
-                self.store.contains_member(connection, source.get("_source_row") or {})
-                for source in batch.get("sources", [])
-            ):
-                self._save_copy_batch(
-                    connection,
-                    batch,
-                    event_sources,
-                    [],
-                    rule,
-                    now,
-                    "页面批次包含已处理源单，后续加入订单不追加",
-                )
-                continue
-
-            intents = []
-            reason = ""
-            for source in event_sources:
-                row = source["_source_row"]
-                if (
-                    enabled
-                    and rule["member_codes"]
-                    and str(row.get("member_user_code") or "") not in rule["member_codes"]
-                ):
-                    continue
-                try:
-                    intent = source_intent(row, self._allow_prematch())
-                except ValueError as exc:
-                    if enabled:
-                        reason = reason or str(exc)
-                        continue
-                    intent = self._fallback_intent(row, now)
-                if not enabled:
-                    intents.append(intent)
-                    continue
-                age = now * 1000 - intent["created_ms"]
-                if age < -5000 or age >= rule["max_age_seconds"] * 1000:
-                    reason = reason or "原单时间异常或已超过最长处理时效"
-                    continue
-                intents.append(intent)
-
-            if not enabled:
-                self._save_copy_batch(
-                    connection,
-                    batch,
-                    event_sources,
-                    intents,
-                    rule,
-                    now,
-                    "跟单未开启，未发送",
-                )
-            elif reason:
-                self._save_copy_batch(connection, batch, event_sources, intents, rule, now, reason)
-            elif not intents:
-                self._save_copy_batch(
-                    connection,
-                    batch,
-                    event_sources,
-                    [],
-                    rule,
-                    now,
-                    "主页批次内没有符合当前来源会员规则的新单",
-                )
+            if enabled:
+                self._queue_copy_batch(connection, batch, rule, now)
             else:
-                self._save_copy_batch(connection, batch, event_sources, intents, rule, now)
+                self._record_disabled_batch(connection, batch, rule, now)
+
+    def _record_disabled_batch(self, connection, batch, rule, now):
+        """跟单未开启时只登记展示批次，不进入 10 秒待跟单窗口。"""
+        order_no = str(batch["order_no"])
+        if self.store.group_for_source_batch(connection, order_no):
+            return
+        event_sources = batch.get("_event_sources") or batch.get("sources") or []
+        if any(
+            self.store.contains_member(connection, source.get("_source_row") or {})
+            for source in batch.get("sources", [])
+        ):
+            self._save_copy_batch(
+                connection,
+                batch,
+                event_sources,
+                [],
+                rule,
+                now,
+                "页面批次包含已处理源单，后续加入订单不追加",
+            )
+            return
+        intents = []
+        for source in event_sources:
+            row = source["_source_row"]
+            try:
+                intent = source_intent(row, self._allow_prematch())
+            except ValueError:
+                intent = self._fallback_intent(row, now)
+            intents.append(intent)
+        self._save_copy_batch(
+            connection, batch, event_sources, intents, rule, now, "跟单未开启，未发送"
+        )
+
+    def _queue_copy_batch(self, connection, batch, rule, now):
+        """把新源单并入同一 20 秒展示批次的 10 秒待跟单窗口，绝不重置倒计时。"""
+        event_sources = batch.get("_event_sources") or batch.get("sources") or []
+        sources = [
+            source
+            for source in event_sources
+            if (source.get("_source_row") or {})
+            and not self.store.contains_member(connection, source["_source_row"])
+            and not self.store.pending_contains_member(connection, source["_source_row"])
+        ]
+        if not sources:
+            return
+        intents = []
+        reason = ""
+        for source in sources:
+            row = source["_source_row"]
+            if (
+                rule["member_codes"]
+                and str(row.get("member_user_code") or "") not in rule["member_codes"]
+            ):
+                continue
+            try:
+                intent = source_intent(row, self._allow_prematch())
+            except ValueError as exc:
+                reason = reason or str(exc)
+                continue
+            age = now * 1000 - intent["created_ms"]
+            if age < -5000 or age >= rule["max_age_seconds"] * 1000:
+                reason = reason or "原单时间异常或已超过最长处理时效"
+                continue
+            intents.append(intent)
+        if reason:
+            self._save_copy_batch(connection, batch, sources, intents, rule, now, reason)
+            return
+        if not intents:
+            self._save_copy_batch(
+                connection,
+                batch,
+                sources,
+                [],
+                rule,
+                now,
+                "主页批次内没有符合当前来源会员规则的新单",
+            )
+            return
+        self._open_pending_batch(connection, batch, intents, rule, now)
+
+    def _open_pending_batch(self, connection, batch, intents, rule, now):
+        """首单进入时写入绝对截止时间；后续订单只并入，不修改截止时间。"""
+        key = str(batch["group_key"])
+        pending = self.store.pending_for_key(connection, key)
+        if pending is not None and int(pending["freeze_at_ms"]) <= int(now * 1000):
+            # 已到期但还没轮到冻结：新单归下一批，不能顺延旧窗口。
+            pending = None
+        if pending is None:
+            pending = {
+                "id": uuid.uuid4().hex,
+                "source_batch_key": key,
+                "page_batch_no": str(batch.get("order_no") or ""),
+                "freeze_at_ms": int(now * 1000) + int(PENDING_SECONDS * 1000),
+                "status": "OPEN",
+                "created_at": iso_time(now),
+                "rule": dict(rule),
+            }
+            self.store.save_pending(connection, pending)
+        for intent in sorted(intents, key=lambda item: item["created_ms"]):
+            if self.store.contains_member(connection, intent):
+                continue
+            self.store.add_pending_member(connection, pending["id"], intent)
+
+    def _freeze_pending_batches(self, connection, now):
+        deadline_ms = int(now * 1000)
+        for pending in self.store.pending_batches(connection):
+            if int(pending.get("freeze_at_ms") or 0) > deadline_ms:
+                continue
+            self._freeze_pending_batch(connection, pending, now)
+
+    def _freeze_pending_batch(self, connection, pending, now):
+        """满 10 秒冻结：统计最终单数/总额，生成批次号并交给原执行链路。"""
+        members = [
+            member
+            for member in self.store.pending_members(connection, pending["id"])
+            if not self.store.contains_member(connection, member)
+        ]
+        if not members:
+            self.store.drop_pending(connection, pending["id"])
+            return None
+        rule = {**pending["rule"], "currency": "CNY"}
+        representative = min(members, key=lambda item: item["created_ms"])
+        source_batch_key = str(pending["source_batch_key"])
+        start_ms = min(int(item["created_ms"]) for item in members)
+        group = None
+        for _attempt in range(3):
+            batch_no = self._next_batch_no(
+                connection, str(pending.get("page_batch_no") or ""), source_batch_key
+            )
+            group = self._new_group(representative, rule, now, "homepage-batch:" + batch_no)
+            group.update(
+                source_batch_no=batch_no,
+                source_batch_key=source_batch_key,
+                start_ms=start_ms,
+                close_ms=start_ms,
+                deadline_ms=start_ms + rule["max_age_seconds"] * 1000,
+                source_created_at=iso_time(start_ms / 1000),
+                deadline_at=iso_time(start_ms / 1000 + rule["max_age_seconds"]),
+                status="READY",
+                source_stake=number_text(
+                    sum((Decimal(item["stake"]) for item in members), Decimal("0"))
+                ),
+                order_count=len(members),
+                member_count=len({item["member_identity"] for item in members}),
+                message="10 秒跟单窗口已冻结，等待执行",
+                waiting_reason="等待赛事映射与皇冠会员分配",
+                error_category="",
+            )
+            try:
+                self.store.save_group(connection, group)
+                break
+            except sqlite3.IntegrityError:
+                # 批次号被并发冻结的实例占用；换下一个后缀重试，不丢成员。
+                group = None
+        if group is None:
+            # 连续冲突时保留待跟单组，下一轮继续冻结而不是丢单。
+            return None
+        for item in members:
+            self.store.add_member(connection, group["id"], item)
+        self.store.drop_pending(connection, pending["id"])
+        return group
+
+    def _next_batch_no(self, connection, page_batch_no, source_batch_key):
+        """首个跟单批次沿用页面 8 位号；同一展示批次再冻结时用 -2、-3 后缀。"""
+        base = str(page_batch_no or "").strip() or "P" + str(source_batch_key)[:8]
+        candidate = base
+        index = 1
+        while connection.execute(
+            "SELECT 1 FROM follow_groups WHERE json_extract(payload,'$.source_batch_no')=?",
+            (candidate,),
+        ).fetchone():
+            index += 1
+            candidate = f"{base}-{index}"
+        return candidate
 
     def _skip(self, connection, row, rule, now, message, intent=None):
         if intent is None:
@@ -896,6 +1024,48 @@ class FollowService:
             group.update(status="REJECTED", message=f"所有会员都试过，已停止跟单：{message}")
             return
 
+        if action == "retry_bet_switch":
+            # 通用拒绝：先逐个换号试，3 个号都不行就保留订单，每 15 秒探一次。
+            until = float(group.get("recheck_until") or 0)
+            if until and now < until:
+                next_at = min(now + 15, until)
+                wait_until(
+                    next_at,
+                    "RETRY_WAIT",
+                    f"换号仍被拒，保留订单再试（剩 {int(until - now)} 秒）：{message}",
+                )
+                return
+            tried = set(group.get("tried_accounts") or [])
+            if group.get("account_id"):
+                tried.add(str(group["account_id"]))
+            group["tried_accounts"] = sorted(tried)
+            untried = [
+                account_id
+                for account_id in self._available_account_ids()
+                if account_id not in tried
+            ]
+            if untried and len(tried) < 3 and guarded(now + 0.4):
+                wait_until(
+                    now + 0.4,
+                    "RETRY_WAIT",
+                    f"换号重试（第 {len(tried) + 1} 个号）：{message}",
+                )
+                return
+            window = float(group.get("recheck_until") or (now + 90))
+            group["deadline_ms"] = max(deadline_ms, (window + 5) * 1000)
+            deadline_ms = float(group["deadline_ms"])
+            if now >= window or not running:
+                group.update(status="REJECTED", message=f"换号重试仍被拒，已停止跟单：{message}")
+                return
+            group["recheck_until"] = window
+            group["tried_accounts"] = []
+            wait_until(
+                min(now + 15, window),
+                "RETRY_WAIT",
+                f"换号仍被拒，保留订单再试（剩 {int(window - now)} 秒）：{message}",
+            )
+            return
+
         if action == "wait_1x001":
             until = float(group.get("market_wait_until") or (now + 260))
             group["deadline_ms"] = max(float(deadline_ms), (until + 5) * 1000)
@@ -937,8 +1107,10 @@ class FollowService:
         if action == "retry_market_90":
             count = int(group.get("market_retry_count") or 0) + 1
             group["market_retry_count"] = count
-            if count <= 1 and guarded(now + 2):
-                wait_until(now + 2, "RETRY_WAIT", f"重新查盘再提交：{message}")
+            if count <= 2 and guarded(now + 0.4):
+                # 盘口变动要在同一个账号上立刻重查重提，排队等待只会错过窗口。
+                group["fast_retry"] = True
+                wait_until(now + 0.4, "RETRY_WAIT", f"重新查盘再提交：{message}")
                 return
             until = float(group.get("recheck_until") or (now + 90))
             group["deadline_ms"] = max(float(deadline_ms), (until + 5) * 1000)
@@ -992,8 +1164,18 @@ class FollowService:
         retryable = result.get("retryable") is True and (known or proven_unsent)
         if group.get("status") == "REJECTED":
             group["reject_count"] = int(group.get("reject_count") or 0) + 1
-        if retryable and int(group.get("reject_count") or 0) < 3 and guarded(now + 2):
-            wait_until(now + 2, "RETRY_WAIT", f"等待重新查盘：{message}")
+        fast = error_code.startswith("betError") or error_code in {
+            "1X005",
+            "1X006",
+            "1X013",
+            "1X015",
+            "1X016",
+        }
+        delay = 0.4 if fast else 2
+        if fast:
+            group["fast_retry"] = True
+        if retryable and int(group.get("reject_count") or 0) < 3 and guarded(now + delay):
+            wait_until(now + delay, "RETRY_WAIT", f"等待重新查盘：{message}")
             return
         if str(result.get("category") or "") == "AMOUNT_REJECTED":
             group["message"] = f"金额受限，已停止跟单：{message}"
@@ -1036,6 +1218,35 @@ class FollowService:
             self.store.save_group(connection, group)
             return True
 
+    # 只比对会影响跟单语义的字段；页面上的浮动展示字段不参与判断。
+    _MEMBER_FIELD_LABELS = {
+        "league": "联赛",
+        "home": "主队",
+        "away": "客队",
+        "event_ms": "开赛时间",
+        "market_type": "玩法",
+        "period": "时段",
+        "side": "方向",
+        "line": "盘口线",
+        "is_live": "滚球状态",
+        "score": "比分",
+        "stake": "金额",
+        "odds": "赔率",
+    }
+
+    @classmethod
+    def _changed_member_field(cls, current, member):
+        for key, label in cls._MEMBER_FIELD_LABELS.items():
+            if key not in member:
+                continue
+            left = current.get(key)
+            right = member.get(key)
+            left = "" if left is None else str(left)
+            right = "" if right is None else str(right)
+            if left != right:
+                return label
+        return ""
+
     def _validate_members(self, members):
         connection = self._source_connect()
         if connection is None:
@@ -1049,8 +1260,9 @@ class FollowService:
                 if row is None:
                     raise ValueError("组内原单已不存在")
                 current = source_intent(dict(row), self._allow_prematch())
-                if current["content_hash"] != member["content_hash"]:
-                    raise ValueError("组内原单内容已变化，需重新核对")
+                changed = self._changed_member_field(current, member)
+                if changed:
+                    raise ValueError(f"组内原单{changed}已变化，需重新核对")
         finally:
             connection.close()
 
@@ -1089,21 +1301,26 @@ class FollowService:
                 )
                 self.store.save_group(connection, group)
                 return None
-            busy = {
-                str(row[0])
-                for row in connection.execute("SELECT account_id FROM follow_claims").fetchall()
-            }
-            busy.update(
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT account_id FROM follow_groups "
-                    "WHERE id<>? AND status IN ('READY','PREPARING','SUBMITTING') "
-                    "AND account_id<>''",
-                    (group_id,),
-                ).fetchall()
-            )
+            # 与 follow_claims 的账号唯一约束一致，同一账号始终只执行一单。
+            limit = 1
+            inflight = self.store.account_inflight(connection, group_id)
             if background and self._dispatcher:
-                busy.update(self._dispatcher.active_accounts())
+                for account_id in self._dispatcher.active_accounts():
+                    inflight[account_id] = inflight.get(account_id, 0) + 1
+            busy = {account_id for account_id, count in inflight.items() if count >= limit}
+            # 盘口变动重试：同一个号立刻再打一次，不重新排队选号。
+            if group.get("fast_retry") and group.get("account_id") in accounts:
+                keep = str(group["account_id"])
+                if keep not in busy:
+                    group.update(
+                        fast_retry=False,
+                        next_check_at=now,
+                        next_action_at=None,
+                        waiting_reason="同账号快速重试",
+                        updated_at=iso_time(now),
+                    )
+                    self.store.save_group(connection, group)
+                    return keep
             tried = set(group.get("tried_accounts") or [])
             free = [
                 account_id
@@ -1329,6 +1546,7 @@ class FollowService:
                 self._execute_split_group(group, members, mapping, intent)
                 return
             try:
+                wager_baseline = self._today_wager_baseline(group["account_id"])
                 quote = self._executor().prepare(mapping, intent, group["account_id"])
                 self._validate_quote(quote, intent, group)
             except Exception as exc:
@@ -1363,7 +1581,11 @@ class FollowService:
                     group.update(
                         status="SUBMITTING",
                         odds=str(quote["odds"]),
-                        message="请求处理中，等待平台回执",
+                        message=(
+                            "皇冠变盘未复核，已按盘口报价提交，等待回执"
+                            if quote.get("verified") is False
+                            else "请求处理中，等待平台回执"
+                        ),
                         waiting_reason="等待平台回执",
                         updated_at=iso_time(self.clock()),
                         next_action_at=None,
@@ -1387,6 +1609,8 @@ class FollowService:
                             "chose_team",
                             "con",
                             "ratio",
+                            "verified",
+                            "verification",
                         )
                     }
                     self.store.save_group(connection, group)
@@ -1420,6 +1644,14 @@ class FollowService:
                     "retryable": False,
                     "request_sent": False,
                 }
+            if result.get("category") == "UNCERTAIN_RESULT" and result.get("request_sent"):
+                result = self._reconcile_uncertain(
+                    group.get("account_id"),
+                    (group.get("quote") or {}).get("gid"),
+                    group.get("target_stake"),
+                    result,
+                    wager_baseline,
+                )
             self._finish(group, attempt_id, attempt, result)
         finally:
             with self.store.connect(write=True) as connection:
@@ -1485,6 +1717,7 @@ class FollowService:
                 aborted = "超过最长源单处理时效"
                 break
             try:
+                wager_baseline = self._today_wager_baseline(group["account_id"])
                 quote = self._executor().prepare(mapping, intent, group["account_id"])
                 self._validate_quote(quote, intent, group)
             except Exception as exc:  # noqa: BLE001 - 单份查盘失败，停止后续分单
@@ -1497,7 +1730,8 @@ class FollowService:
                     {
                         "id": uuid.uuid4().hex,
                         "group_id": group_id,
-                        "part_index": index,
+                        "part_index": len(results),
+                        "parent_part_index": index,
                         "status": "REJECTED",
                         "stake": number_text(Decimal(stake)),
                         "account_id": group["account_id"],
@@ -1532,7 +1766,11 @@ class FollowService:
                 group.update(
                     status="SUBMITTING",
                     odds=str(quote["odds"]),
-                    message=f"分单 {index + 1}/{len(parts)} 提交中",
+                    message=(
+                        f"分单 {index + 1}/{len(parts)} 变盘未复核提交中"
+                        if quote.get("verified") is False
+                        else f"分单 {index + 1}/{len(parts)} 提交中"
+                    ),
                     waiting_reason="等待平台回执",
                     updated_at=iso_time(self.clock()),
                     next_action_at=None,
@@ -1556,6 +1794,8 @@ class FollowService:
                         "chose_team",
                         "con",
                         "ratio",
+                        "verified",
+                        "verification",
                     )
                 }
                 self.store.save_group(connection, group)
@@ -1580,6 +1820,7 @@ class FollowService:
                 half = (Decimal(stake) / 2).quantize(Decimal("1"))
                 rest = Decimal(stake) - half
                 for sub_index, amount in enumerate((half, rest)):
+                    sub_baseline = self._today_wager_baseline(group["account_id"])
                     try:
                         sub_quote = self._executor().prepare(mapping, intent, group["account_id"])
                         self._validate_quote(sub_quote, intent, group)
@@ -1593,6 +1834,16 @@ class FollowService:
                             "retryable": False,
                             "request_sent": False,
                         }
+                    if sub_result.get("category") == "UNCERTAIN_RESULT" and sub_result.get(
+                        "request_sent"
+                    ):
+                        sub_result = self._reconcile_uncertain(
+                            group.get("account_id"),
+                            sub_quote.get("gid"),
+                            amount,
+                            sub_result,
+                            sub_baseline,
+                        )
                     sub_status, sub_receipt, sub_stake, sub_odds = self._split_result(
                         sub_result, amount
                     )
@@ -1600,7 +1851,8 @@ class FollowService:
                         {
                             "id": uuid.uuid4().hex,
                             "group_id": group_id,
-                            "part_index": index,
+                            "part_index": len(results) + sub_index,
+                            "parent_part_index": index,
                             "sub_index": sub_index,
                             "status": sub_status,
                             "stake": number_text(amount),
@@ -1615,24 +1867,42 @@ class FollowService:
                     with self.store.connect(write=True) as connection:
                         self.store.save_part(connection, extra_parts[-1])
                 results.extend(extra_parts)
+                successful_subparts = [
+                    item for item in extra_parts if item["status"] == "SUCCEEDED"
+                ]
+                tickets.extend(
+                    item["ticket_id"] for item in successful_subparts if item["ticket_id"]
+                )
+                accepted_total += sum(
+                    (
+                        Decimal(item["accepted_stake"] or item["stake"])
+                        for item in successful_subparts
+                    ),
+                    Decimal("0"),
+                )
+                accepted_odds = next(
+                    (
+                        item["accepted_odds"]
+                        for item in successful_subparts
+                        if item["accepted_odds"]
+                    ),
+                    accepted_odds,
+                )
                 if all(item["status"] == "SUCCEEDED" for item in extra_parts):
                     success += 1
-                    tickets.extend(item["ticket_id"] for item in extra_parts if item["ticket_id"])
-                    accepted_total += sum(
-                        Decimal(item["accepted_stake"] or item["stake"]) for item in extra_parts
-                    )
-                    accepted_odds = next(
-                        (item["accepted_odds"] for item in extra_parts if item["accepted_odds"]),
-                        accepted_odds,
-                    )
                 if index < len(parts) - 1 and delay > 0:
                     self._stop.wait(delay)
                 continue
+            if result.get("category") == "UNCERTAIN_RESULT" and result.get("request_sent"):
+                result = self._reconcile_uncertain(
+                    group.get("account_id"), quote.get("gid"), stake, result, wager_baseline
+                )
             status, receipt, accepted_stake, part_odds = self._split_result(result, stake)
             part = {
                 "id": uuid.uuid4().hex,
                 "group_id": group_id,
-                "part_index": index,
+                "part_index": len(results),
+                "parent_part_index": index,
                 "status": status,
                 "stake": number_text(Decimal(stake)),
                 "account_id": group["account_id"],
@@ -1660,7 +1930,7 @@ class FollowService:
         total = len(parts)
         if success == total:
             status, message = "SUCCEEDED", f"分单全部成功（{success}/{total}）"
-        elif success:
+        elif accepted_total > 0:
             status = "PARTIAL"
             message = f"分单部分成功（{success}/{total}）"
             if aborted:
@@ -1691,6 +1961,68 @@ class FollowService:
             )
             self.store.save_group(connection, current)
 
+    def _today_wager_baseline(self, account_id):
+        reader = getattr(self._executor(), "today_wager_ids", None)
+        if not callable(reader):
+            return None
+        try:
+            tickets = reader(account_id)
+            return set(tickets) if isinstance(tickets, (set, list, tuple)) else None
+        except Exception:
+            # 基线不可用仍可正常提交，但中断后不得认领无法确定归属的旧票。
+            return None
+
+    def _reconcile_uncertain(self, account_id, gid, stake, result, baseline=None):
+        """提交响应中断时，用皇冠今日注单核对是否真的下出去了。"""
+        finder = getattr(self._executor(), "find_today_wager", None)
+        if not callable(finder) or not gid or baseline is None:
+            return {
+                **result,
+                "message": "提交中断，缺少发送前注单基线，请到平台人工核对",
+            }
+        try:
+            wager = finder(account_id, gid, stake, excluded_tickets=baseline)
+        except Exception:  # noqa: BLE001 - 核对失败不能当成未下注
+            return {
+                **result,
+                "status": "REJECTED",
+                "message": "提交中断，且核对皇冠今日注单失败，请到平台人工核对",
+                "category": "UNCERTAIN_RESULT",
+            }
+        if not wager:
+            return {
+                **result,
+                "status": "REJECTED",
+                "message": "提交中断，今日注单未找到该笔的唯一新票，请到平台人工核对",
+                "category": "UNCERTAIN_RESULT",
+            }
+        ticket = str(wager.get("w_id") or "").strip()
+        if not ticket:
+            return result
+        with self.store.connect() as connection:
+            used = connection.execute(
+                "SELECT 1 FROM follow_groups WHERE account_id=? AND receipt_id=? "
+                "UNION ALL SELECT 1 FROM follow_parts WHERE account_id=? AND ticket_id=? LIMIT 1",
+                (account_id, ticket, account_id, ticket),
+            ).fetchone()
+        if used:
+            return {
+                **result,
+                "status": "REJECTED",
+                "message": f"提交中断，皇冠今日注单 {ticket} 已被其他订单记录，请人工核对",
+                "category": "UNCERTAIN_RESULT",
+            }
+        return {
+            "status": "SUCCEEDED",
+            "receipt_id": ticket,
+            "accepted_stake": str(wager.get("gold") or ""),
+            "accepted_odds": str(wager.get("ioratio") or ""),
+            "message": "提交中断，已从皇冠今日注单核对到票号",
+            "category": "RECONCILED",
+            "request_sent": True,
+            "retryable": False,
+        }
+
     def _prepare_failed(self, group, error):
         now = self.clock()
         message = (
@@ -1712,10 +2044,20 @@ class FollowService:
                 "PREPARE_UNAVAILABLE",
                 "RESPONSE_INVALID",
                 "ACCOUNT_SESSION",
+                "MARKET_AMBIGUOUS",
             }
             and count >= 6
         )
-        delay = min(15, 3 * 2 ** min(count - 1, 3))
+        # 盘口出现多条同线属于瞬时抖动，1.5 秒后重查通常就唯一了。
+        delay = 1.5 if category == "MARKET_AMBIGUOUS" else min(15, 3 * 2 ** min(count - 1, 3))
+        if category == "VARIABLE_STANDARD" and group.get("account_id"):
+            tried = set(group.get("tried_accounts") or [])
+            tried.add(str(group["account_id"]))
+            available = set(self._available_account_ids())
+            if available and tried >= available:
+                tried = set()
+            group["tried_accounts"] = sorted(tried)
+            group["account_id"] = ""
         group.update(
             error_category=category,
             waiting_reason=message,

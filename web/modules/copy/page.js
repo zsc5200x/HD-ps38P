@@ -238,7 +238,9 @@ function renderBoard() {
   setText("copyIdleMembers", number(Math.max(0, eligible.length - active), 0));
   setText("copyBusyMembers", number(Math.min(active, eligible.length), 0));
   setText("copyOfflineMembers", number(accounts.length - online.length, 0));
-  setText("copyQueuedTasks", number(service.queued_tasks ?? 0, 0));
+  // 等待任务包含已冻结待执行，以及仍在 10 秒待跟单窗口里的批次。
+  const queued = Number(service.queued_tasks ?? 0) + Number(service.pending_tasks ?? 0);
+  setText("copyQueuedTasks", number(queued, 0));
   setText("copyActiveTasks", number(service.active_tasks ?? 0, 0));
 
   const summary = state.summary || {};

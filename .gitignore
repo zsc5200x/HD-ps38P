@@ -3,6 +3,8 @@
 .playwright-mcp/
 .ruff_cache/
 .pytest_cache/
+.swift-cache/
+.tmp/
 screenshots/
 __pycache__/
 *.pyc

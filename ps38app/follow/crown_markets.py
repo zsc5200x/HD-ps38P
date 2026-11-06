@@ -119,6 +119,7 @@ def game_rows(body):
     for node in root.iter("game"):
         row = scalar_fields(node)
         row["mode"] = node.get("mode", "").upper()
+        row["master"] = node.get("master", "").upper()
         rows.append(row)
     if not rows and top.get("original"):
         try:
@@ -279,21 +280,41 @@ def select_market(rows, game, intent):
                 "ratio": ratio,
                 "odds": text_number(odd),
                 "odds_format": "HK",
+                "master": str(row.get("master") or "Y").upper(),
+                "team_h_id": str(game.get("team_h_id") or ""),
+                "team_c_id": str(game.get("team_c_id") or ""),
                 "score": score_text(intent["score"]) if intent.get("score") else "",
                 "home": game["team_h"],
                 "away": game["team_c"],
             }
         )
+    if len(matches) > 1:
+        # 主盘和附加盘可能报同一条线：优先主盘，附加盘只在没有主盘时使用。
+        primary = [item for item in matches if str(item.get("master") or "Y").upper() != "N"]
+        if len(primary) == 1:
+            matches = primary
+        elif primary:
+            matches = primary
     if len(matches) != 1:
         if not matches and score_changed:
             # 比分已经变了：这注的语义不再成立，必须停止而不是反复重查。
             raise FollowPreparationError("比分已变化，停止跟单", "SCORE_CHANGED", retryable=False)
+        # 多条同线通常是盘口抖动，等一两秒再查一次，不要立刻判死。
         raise FollowPreparationError(
             "目标盘口缺失、封盘或存在多个匹配",
             "MARKET_UNAVAILABLE" if not matches else "MARKET_AMBIGUOUS",
-            retryable=not matches,
+            retryable=True,
         )
     return matches[0]
+
+
+def _name_key(value):
+    """队名兜底比对：去掉空白和括号注释，繁简差异按字形归一。"""
+    text = re.sub(r"\s+", "", str(value or ""))
+    text = re.sub(r"[（(].*?[)）]", "", text)
+    for old, new in (("內", "内"), ("爾", "尔"), ("斯", "斯"), ("隊", "队")):
+        text = text.replace(old, new)
+    return text.casefold()
 
 
 def verify_context(body, quote):
@@ -310,9 +331,7 @@ def verify_context(body, quote):
         "ratio": fields.get("ratio"),
     }
     rtype_ok = checks["rtype"] is None or checks["rtype"] == quote["rtype"]
-    if not rtype_ok or any(
-        decimal(checks[key]) != decimal(quote[key]) for key in ("con", "ratio")
-    ):
+    if not rtype_ok or any(decimal(checks[key]) != decimal(quote[key]) for key in ("con", "ratio")):
         raise FollowPreparationError("皇冠确认盘口已发生变化", "MARKET_CHANGED", retryable=True)
     for actual, expected in (
         (fields.get("gid") or fields.get("game_gid"), quote["gid"]),
@@ -320,13 +339,24 @@ def verify_context(body, quote):
     ):
         if actual and actual != expected:
             raise ValueError("皇冠确认返回了不同盘口")
-    for key, expected in (
-        ("wtype", quote["wtype"]),
-        ("gtype", "FT"),
-        ("team_name_h", quote.get("home")),
-        ("team_name_c", quote.get("away")),
-    ):
+    for key, expected in (("wtype", quote["wtype"]), ("gtype", "FT")):
         if fields.get(key) and fields[key] != expected:
+            raise ValueError("皇冠确认返回了不同赛事或玩法")
+    # 队名只用于展示，皇冠译名会变（內/内）；有队伍 ID 时以 ID 为准。
+    for side, expected in (
+        ("h", quote.get("team_h_id") or ""),
+        ("c", quote.get("team_c_id") or ""),
+    ):
+        actual = str(fields.get(f"team_id_{side}") or "").strip()
+        if expected and actual and actual != str(expected).strip():
+            raise ValueError("皇冠确认返回了不同赛事或玩法")
+    for side, name in (("h", "home"), ("c", "away")):
+        # 只有响应也回显该队 ID 时才能省略队名校验，报价单方持有 ID 不足为据。
+        if quote.get(f"team_{side}_id") and fields.get(f"team_id_{side}"):
+            continue
+        expected = quote.get(name)
+        actual = str(fields.get(f"team_name_{side}") or "").strip()
+        if expected and actual and _name_key(actual) != _name_key(expected):
             raise ValueError("皇冠确认返回了不同赛事或玩法")
     if re.search(
         r"角球|corner",
@@ -350,7 +380,6 @@ def verify_context(body, quote):
     ):
         raise FollowPreparationError("皇冠确认金额范围无效", "PREPARE_INVALID")
     return confirmed
-
 
 
 # 皇冠 FT_bet 错误码 → (中文提示, 分类, 是否可重试)
@@ -401,6 +430,7 @@ RETRYABLE_ACTIONS = {
     "retry_3x10",
     "pending",
     "disable_account",
+    "retry_bet_switch",
 }
 
 
@@ -482,6 +512,17 @@ def parse_receipt(body):
         or fields.get("errormsg")
     ):
         raw_error = fields.get("errormsg", "")
+        # betError000 是通用拒绝：先换号重试，仍失败再保留订单等盘口恢复。
+        if str(raw_error).strip().lower() == "beterror000":
+            return {
+                "status": "REJECTED",
+                "message": "皇冠拒绝本次请求（通用拒绝）",
+                "category": "MARKET_REJECTED",
+                "error_code": raw_error,
+                "action": "retry_bet_switch",
+                "retryable": True,
+                "request_sent": True,
+            }
         # 已知错误码：翻成中文，并给出后续动作。
         described = describe_crown_error(raw_error) or describe_crown_error(code)
         if described:
@@ -511,11 +552,7 @@ def parse_receipt(body):
             else "PLATFORM_REJECTED"
         )
         error_code = (
-            "doubleLogin"
-            if session_error
-            else raw_error[:60]
-            if raw_error
-            else "PLATFORM_REJECTED"
+            "doubleLogin" if session_error else raw_error[:60] if raw_error else "PLATFORM_REJECTED"
         )
         return {
             "status": "REJECTED",

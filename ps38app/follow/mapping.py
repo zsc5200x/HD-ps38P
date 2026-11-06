@@ -31,8 +31,21 @@ def resolve_fixture(path, intent):
             }
     except sqlite3.Error:
         raise ValueError("赛事映射暂不可读取") from None
+    # 合并表已经有唯一事件 ID：能命中就直接用，不再靠队名相似度反推。
+    source_id = str(intent.get("source_event_id") or "").strip()
+    direct_ids = {
+        str(row["ps38_event_id"])
+        for row in rows
+        if source_id
+        and str(row["ps38_event_id"] or "").removeprefix("pin:") == source_id.removeprefix("pin:")
+    }
+    if len(direct_ids) > 1:
+        raise ValueError("赛事映射不唯一，需核对")
+
     matches = []
     for row in rows:
+        if direct_ids and str(row["ps38_event_id"]) not in direct_ids:
+            continue
         try:
             pinnacle, crown = json.loads(row["ps38_snapshot"]), json.loads(row["crown_snapshot"])
         except (ValueError, TypeError):
@@ -41,11 +54,13 @@ def resolve_fixture(path, intent):
             continue
         if (str(pinnacle.get("leagueId") or ""), str(crown.get("leagueId") or "")) not in leagues:
             continue
-        if normalize_league(intent["league"]) != normalize_league(pinnacle.get("league")):
+        if not direct_ids and normalize_league(intent["league"]) != normalize_league(
+            pinnacle.get("league")
+        ):
             continue
         if competition_conflict(intent["league"], pinnacle.get("league")):
             continue
-        if any(
+        if not direct_ids and any(
             normalize_team(intent[side]) != normalize_team(pinnacle.get(side))
             for side in ("home", "away")
         ):
@@ -57,10 +72,10 @@ def resolve_fixture(path, intent):
             ids |= {value[4:] for value in ids if value.startswith("pin:")}
             if source_id not in ids:
                 continue
-        if crown.get("reversedOrder"):
-            raise ValueError("皇冠主客队顺序颠倒，需核对方向后处理")
         if not crown.get("home") or not crown.get("away") or crown.get("isFinished"):
             continue
+        if crown.get("reversedOrder"):
+            raise ValueError("皇冠主客队顺序颠倒，需核对方向后处理")
         if competition_conflict(pinnacle.get("league"), crown.get("league")):
             continue
         fingerprint = hashlib.sha256(

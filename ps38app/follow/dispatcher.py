@@ -11,8 +11,9 @@ class BoundedDispatcher:
     的网络请求不会被强制中断；调用方仍可回收并保存其最终结果。
     """
 
-    def __init__(self, max_workers=2, on_done=None):
+    def __init__(self, max_workers=2, on_done=None, per_account=1):
         self.max_workers = max(1, int(max_workers))
+        self.per_account = max(1, int(per_account))
         self._on_done = on_done
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
@@ -20,7 +21,7 @@ class BoundedDispatcher:
         )
         self._active = {}
         self._keys = set()
-        self._accounts = set()
+        self._accounts = {}
         self._closed = False
 
     def submit(self, key, account_id, fn, *args, **kwargs):
@@ -33,17 +34,17 @@ class BoundedDispatcher:
             if (
                 self._closed
                 or key in self._keys
-                or account_id in self._accounts
+                or self._accounts.get(account_id, 0) >= self.per_account
                 or len(self._active) >= self.max_workers
             ):
                 return None
             self._keys.add(key)
-            self._accounts.add(account_id)
+            self._accounts[account_id] = self._accounts.get(account_id, 0) + 1
             try:
                 future = self._executor.submit(fn, *args, **kwargs)
             except BaseException:
                 self._keys.discard(key)
-                self._accounts.discard(account_id)
+                self._release_account(account_id)
                 raise
             self._active[future] = (key, account_id)
         # 已完成 Future 会同步执行回调；放在锁外以允许唤醒调用方安全重入。
@@ -67,7 +68,7 @@ class BoundedDispatcher:
                     continue
                 del self._active[future]
                 self._keys.discard(key)
-                self._accounts.discard(account_id)
+                self._release_account(account_id)
                 completed.append((key, account_id, future))
         return completed
 
@@ -78,6 +79,14 @@ class BoundedDispatcher:
     def active_count(self):
         with self._lock:
             return len(self._active)
+
+    def _release_account(self, account_id):
+        """释放一次账号占用（引用计数，支持同号多单）。"""
+        remaining = self._accounts.get(account_id, 0) - 1
+        if remaining > 0:
+            self._accounts[account_id] = remaining
+        else:
+            self._accounts.pop(account_id, None)
 
     def active_accounts(self):
         with self._lock:
